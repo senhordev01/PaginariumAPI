@@ -3,8 +3,13 @@ import "dotenv/config";
 
 const { Pool } = pg;
 
+const connectionString =
+  process.env.ENV === "prod"
+    ? process.env.DATABASE_URL_SUPA
+    : process.env.DATABASE_URL;
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL
+  connectionString,
 });
 
 pool.on("connect", () => {

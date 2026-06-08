@@ -5,6 +5,8 @@ import pool from "./db.js";
 import bcrypt, {genSalt} from "bcrypt";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
+import supabase from "./supabase.js";
+import multer from "multer";
 const app = express();
 const porta = 8080;
 
@@ -12,6 +14,9 @@ const porta = 8080;
 app.use(express.json());
 app.use(cors());
 
+const upload = multer({
+  storage: multer.memoryStorage(),
+});
 
 //node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 
@@ -91,44 +96,73 @@ app.post("/cadastro", async (req, res) => {
 /*Area de Login no Sistema*/
 
 app.post("/login", async (req, res) => {
-    try {
-        const { email, senha } = req.body;
+  try {
+    const { email, senha } = req.body;
 
-        if (!email || !senha) {
-            return res.status(422).json("Email e senha obrigatórios");
-        }
-
-        const resultado = await pool.query(
-            "SELECT * FROM Usuarios WHERE email=$1",
-            [email]
-        );
-
-        if (resultado.rows.length === 0) {
-            return res.status(404).json("Usuário não encontrado");
-        }
-
-        const usuario = resultado.rows[0];
-        const senhaValida = await bcrypt.compare(senha, usuario.senha);
-
-        if (!senhaValida) {
-            return res.status(401).json("Senha inválida");
-        }
-
-        const token = jwt.sign(
-            { id: usuario.id, email: usuario.email },
-            process.env.CHAVE_TOKEN,
-            { expiresIn: "2h" }
-        );
-
-        res.json({
-            mensagem: "Login realizado",
-            token
-        });
-
-    } catch (erro) {
-        console.log(erro.message);
-        res.status(500).json("Erro no servidor");
+    if (!email || !senha) {
+      return res.status(422).json("Email e senha obrigatórios");
     }
+
+    // 🔎 procura usuário normal
+    const usuarioRes = await pool.query(
+      "SELECT * FROM Usuarios WHERE email=$1",
+      [email]
+    );
+
+    // 🔎 procura admin
+    const adminRes = await pool.query(
+      "SELECT * FROM Administradores WHERE email=$1",
+      [email]
+    );
+
+    let usuario = null;
+    let tipo = null;
+
+    if (usuarioRes.rows.length > 0) {
+      usuario = usuarioRes.rows[0];
+      tipo = "normal";
+    }
+
+    if (adminRes.rows.length > 0) {
+      usuario = adminRes.rows[0];
+      tipo = "admin";
+    }
+
+    if (!usuario) {
+      return res.status(404).json("Usuário não encontrado");
+    }
+
+    const senhaValida = await bcrypt.compare(senha, usuario.senha);
+
+    if (!senhaValida) {
+      return res.status(401).json("Senha inválida");
+    }
+
+    const token = jwt.sign(
+      {
+        id: usuario.id,
+        email: usuario.email,
+        tipo, // 🔥 IMPORTANTE
+      },
+      process.env.CHAVE_TOKEN,
+      { expiresIn: "2h" }
+    );
+
+    res.json({
+      mensagem: "Login realizado",
+      token,
+      usuario: {
+        id: usuario.id,
+        nome: usuario.nome,
+        email: usuario.email,
+        tipo: tipo // "normal" ou "admin"
+      }
+    });
+
+  } catch (erro) {
+    console.log(erro.message);
+    res.status(500).json("Erro no servidor");
+  }
 });
 
 function verificarAcesso(req, id) {
@@ -265,40 +299,102 @@ app.post("/admin/login", async (req, res) => {
 /*Area do Crud dos Livros*/
 
 // POST
-app.post("/livros", async (req, res) => {
+app.post("/livros", upload.any(), async (req, res) => {
   try {
-    const { nome, genero } = req.body;
+    const { nome, genero, valor } = req.body;
+
+    const capa = req.files?.find(f => f.fieldname === "capa");
+    const pdf = req.files?.find(f => f.fieldname === "pdf");
+    const valorNumber = Number(valor);
+
+    if (!Number.isFinite(valorNumber)) {
+      return res.status(422).json("Valor inválido");
+    }
+
+    console.log("FILES RECEBIDOS:", req.files);
 
     if (!nome || !genero) {
-      return res.status(422).json("Campos obrigatórios faltando");
+      return res.status(422).json("Nome e gênero são obrigatórios");
     }
+
+    if (!capa || !pdf || !capa.buffer || !pdf.buffer) {
+      return res.status(422).json("Capa e PDF são obrigatórios");
+    }
+
     const livroExiste = await pool.query(
-      `
-      SELECT * FROM livros
-      WHERE nome = $1
-      `,
+      `SELECT 1 FROM livros WHERE nome = $1`,
       [nome]
     );
 
-    if(livroExiste.rows.length > 0){
-        return res.status(409).json("Esse livro ja foi cadastrado!");
+    if (livroExiste.rows.length > 0) {
+      return res.status(409).json("Esse livro já foi cadastrado!");
     }
+
+    const sanitize = (name) =>
+      name
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-zA-Z0-9.-]/g, "-");
+
+    const nomeCapa = `${Date.now()}-${sanitize(capa.originalname)}`;
+    const nomePdf = `${Date.now()}-${sanitize(pdf.originalname)}`;
+
+    const { error: erroCapa } = await supabase.storage
+      .from("capas")
+      .upload(nomeCapa, capa.buffer, {
+        contentType: capa.mimetype,
+      });
+
+    if (erroCapa) {
+      console.log("ERRO CAPA:", erroCapa);
+      return res.status(500).json(erroCapa.message);
+    }
+
+    const { error: erroPdf } = await supabase.storage
+      .from("Livros")
+      .upload(nomePdf, pdf.buffer, {
+        contentType: pdf.mimetype,
+      });
+
+    if (erroPdf) {
+      console.log("ERRO PDF:", erroPdf);
+      return res.status(500).json(erroPdf.message);
+    }
+
+    const capaUrl = supabase.storage
+      .from("capas")
+      .getPublicUrl(nomeCapa).data.publicUrl;
+
+    const pdfUrl = supabase.storage
+      .from("Livros")
+      .getPublicUrl(nomePdf).data.publicUrl;
+
     const resultado = await pool.query(
       `
-      INSERT INTO livros (nome, genero)
-      VALUES ($1, $2)
+      INSERT INTO livros (nome, genero, capa_url, pdf_url, valor)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING *
       `,
-      [nome, genero]
+      [nome, genero, capaUrl, pdfUrl, valorNumber]
     );
 
+    return res.status(201).json({
+      livro: resultado.rows[0],
+      msg: "Livro inserido com sucesso",
+    });
 
-    res.status(201).json({banco: resultado.rows[0], msg:"livro inserido com sucesso"});
+    console.log("HEADERS:", req.headers["content-type"]);
+    console.log("FILES RECEBIDOS:", req.files);
+    console.log("BODY:", req.body);
+    console.log("CAPA:", capa);
+    console.log("BUFFER SIZE:", capa?.buffer?.length);
+    console.log("CAPA URL:", capaUrl);
+
   } catch (erro) {
-    res.status(500).json({ erro: erro.message });
+    console.log("ERRO /livros:", erro);
+    return res.status(500).json({ erro: erro.message });
   }
 });
-
 
 // GET
 app.get("/livros", async (req, res) => {
@@ -319,29 +415,89 @@ app.get("/livros", async (req, res) => {
 
 
 // PUT
-app.put("/livros/:id", async (req, res) => {
+app.put("/livros/:id", upload.any(), async (req, res) => {
   try {
-    const { nome, genero } = req.body;
     const { id } = req.params;
+    const { nome, genero, valor } = req.body;
+
+    const capa = req.files?.find(f => f.fieldname === "capa");
+    const pdf = req.files?.find(f => f.fieldname === "pdf");
+
+    const valorNumber = Number(valor);
+
+    if (!Number.isFinite(valorNumber)) {
+      return res.status(422).json("Valor inválido");
+    }
+
+    const livroAtual = await pool.query(
+      "SELECT * FROM livros WHERE id = $1",
+      [id]
+    );
+
+    if (livroAtual.rows.length === 0) {
+      return res.status(404).json("Livro não encontrado");
+    }
+
+    let capaUrl = livroAtual.rows[0].capa_url;
+    let pdfUrl = livroAtual.rows[0].pdf_url;
+
+    const sanitize = (name) =>
+      name
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-zA-Z0-9.-]/g, "-");
+
+    if (capa) {
+      const nomeCapa = `${Date.now()}-${sanitize(capa.originalname)}`;
+
+      const { error } = await supabase.storage
+        .from("capas")
+        .upload(nomeCapa, capa.buffer, {
+          contentType: capa.mimetype,
+        });
+
+      if (error) return res.status(500).json(error.message);
+
+      capaUrl = supabase.storage
+        .from("capas")
+        .getPublicUrl(nomeCapa).data.publicUrl;
+    }
+
+    if (pdf) {
+      const nomePdf = `${Date.now()}-${sanitize(pdf.originalname)}`;
+
+      const { error } = await supabase.storage
+        .from("Livros")
+        .upload(nomePdf, pdf.buffer, {
+          contentType: pdf.mimetype,
+        });
+
+      if (error) return res.status(500).json(error.message);
+
+      pdfUrl = supabase.storage
+        .from("Livros")
+        .getPublicUrl(nomePdf).data.publicUrl;
+    }
 
     const resultado = await pool.query(
       `
       UPDATE livros
-      SET nome = $1, genero = $2
-      WHERE id = $3
+      SET nome = $1,
+          genero = $2,
+          capa_url = $3,
+          pdf_url = $4,
+          valor = $5
+      WHERE id = $6
       RETURNING *
       `,
-      [nome, genero, id]
+      [nome, genero, capaUrl, pdfUrl, valorNumber, id]
     );
 
-    if (resultado.rows.length === 0) {
-      return res.status(404).json("Livro não encontrado");
-    }
-
-    res.json(resultado.rows[0]);
+    return res.json(resultado.rows[0]);
 
   } catch (erro) {
-    res.status(500).json({ erro: erro.message });
+    console.log(erro);
+    return res.status(500).json({ erro: erro.message });
   }
 });
 
@@ -372,5 +528,5 @@ app.delete("/livros/:id", async (req, res) => {
 });
 
 app.listen(porta, () => {
-  console.log(`rodando na porta ${porta}`);
+  console.log(`rodando na porta: ${porta}`);
 });
