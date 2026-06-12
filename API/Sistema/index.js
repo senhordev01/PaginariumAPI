@@ -240,7 +240,7 @@ app.post("/alugueis", checar_token, async (req, res) => {
     const livroRes = await pool.query("SELECT * FROM livros WHERE id=$1", [livro_id]);
     if (livroRes.rows.length === 0) return res.status(404).json("Livro não encontrado");
     const livro = livroRes.rows[0];
-    const valor_total = Number(livro.valor) * meses;
+    const valor_total = Number(livro.valor) * Number(meses);
 
     const usuarioRes = await pool.query("SELECT * FROM Usuarios WHERE id=$1", [usuario_id]);
     if (usuarioRes.rows.length === 0) return res.status(404).json("Usuário não encontrado");
@@ -255,14 +255,16 @@ app.post("/alugueis", checar_token, async (req, res) => {
       [valor_total, usuario_id]
     );
 
-    const data_fim = new Date();
-    data_fim.setMonth(data_fim.getMonth() + meses);
+    // ✅ Calcula data_fim corretamente em formato YYYY-MM-DD
+    const dataFim = new Date();
+    dataFim.setMonth(dataFim.getMonth() + Number(meses));
+    const dataFimISO = dataFim.toISOString().split("T")[0];
 
     const resultado = await pool.query(
-      `INSERT INTO alugueis (usuario_id, livro_id, meses, valor_total, data_fim)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO alugueis (usuario_id, livro_id, meses, valor_total, data_inicio, data_fim)
+       VALUES ($1, $2, $3, $4, CURRENT_DATE, $5)
        RETURNING *`,
-      [usuario_id, livro_id, meses, valor_total, data_fim]
+      [usuario_id, livro_id, meses, valor_total, dataFimISO]
     );
 
     const usuarioAtualizado = await pool.query(
