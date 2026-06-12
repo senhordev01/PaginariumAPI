@@ -4,7 +4,6 @@ import cors from "cors";
 import pool from "./db.js";
 import bcrypt, { genSalt } from "bcrypt";
 import jwt from "jsonwebtoken";
-import crypto from "crypto";
 import supabase from "./supabase.js";
 import multer from "multer";
 
@@ -16,7 +15,49 @@ app.use(cors());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-const chave = Buffer.from(process.env.CHAVE_CRYPTO, 'hex');
+async function inicializarBanco() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS Usuarios (
+        id        SERIAL PRIMARY KEY,
+        nome      VARCHAR(255) NOT NULL,
+        email     VARCHAR(255) UNIQUE NOT NULL,
+        senha     VARCHAR(255) NOT NULL,
+        credito   NUMERIC(10,2) DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS Administradores (
+        id    SERIAL PRIMARY KEY,
+        nome  VARCHAR(255) NOT NULL,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        senha VARCHAR(255) NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS livros (
+        id       SERIAL PRIMARY KEY,
+        nome     VARCHAR(255) NOT NULL,
+        genero   VARCHAR(100),
+        capa_url TEXT,
+        pdf_url  TEXT,
+        valor    NUMERIC(10,2) NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS alugueis (
+        id          SERIAL PRIMARY KEY,
+        usuario_id  INT REFERENCES Usuarios(id) ON DELETE CASCADE,
+        livro_id    INT REFERENCES livros(id) ON DELETE CASCADE,
+        meses       INT NOT NULL,
+        valor_total NUMERIC(10,2) NOT NULL,
+        data_inicio DATE DEFAULT CURRENT_DATE,
+        data_fim    DATE,
+        criado_em   TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log("Tabelas verificadas/criadas com sucesso");
+  } catch (erro) {
+    console.error("Erro ao criar tabelas:", erro.message);
+  }
+}
 
 function checar_token(req, res, next) {
   try {
@@ -154,7 +195,7 @@ app.delete("/usuarios/:id", checar_token, async (req, res) => {
   }
 });
 
-app.post("/admin/login", async (req, res) => {
+app.post("/admin/cadastro", async (req, res) => {
   try {
     const { nome, email, senha } = req.body;
     const admExiste = await pool.query(`SELECT * FROM Administradores WHERE email=$1`, [email]);
@@ -175,7 +216,6 @@ app.post("/admin/login", async (req, res) => {
 
 // ─── ALUGUÉIS ────────────────────────────────────────────────────────────────
 
-// POST /alugueis — registra aluguel, deduz crédito e bloqueia duplicata ativa
 app.post("/alugueis", checar_token, async (req, res) => {
   try {
     const usuario_id = Number(req.usuario.id);
@@ -185,7 +225,6 @@ app.post("/alugueis", checar_token, async (req, res) => {
       return res.status(422).json("Dados inválidos");
     }
 
-    // verifica se já existe aluguel ativo para esse livro
     const aluguelAtivo = await pool.query(
       `SELECT 1 FROM alugueis
        WHERE usuario_id = $1
@@ -198,13 +237,11 @@ app.post("/alugueis", checar_token, async (req, res) => {
       return res.status(409).json("Você já possui este livro alugado e ainda no prazo.");
     }
 
-    // busca livro
     const livroRes = await pool.query("SELECT * FROM livros WHERE id=$1", [livro_id]);
     if (livroRes.rows.length === 0) return res.status(404).json("Livro não encontrado");
     const livro = livroRes.rows[0];
     const valor_total = Number(livro.valor) * meses;
 
-    // busca crédito atual
     const usuarioRes = await pool.query("SELECT * FROM Usuarios WHERE id=$1", [usuario_id]);
     if (usuarioRes.rows.length === 0) return res.status(404).json("Usuário não encontrado");
     const credito_atual = Number(usuarioRes.rows[0].credito);
@@ -213,17 +250,14 @@ app.post("/alugueis", checar_token, async (req, res) => {
       return res.status(400).json("Saldo insuficiente");
     }
 
-    // deduz crédito
     await pool.query(
       "UPDATE Usuarios SET credito = credito - $1 WHERE id = $2",
       [valor_total, usuario_id]
     );
 
-    // calcula data_fim
     const data_fim = new Date();
     data_fim.setMonth(data_fim.getMonth() + meses);
 
-    // registra aluguel
     const resultado = await pool.query(
       `INSERT INTO alugueis (usuario_id, livro_id, meses, valor_total, data_fim)
        VALUES ($1, $2, $3, $4, $5)
@@ -231,7 +265,6 @@ app.post("/alugueis", checar_token, async (req, res) => {
       [usuario_id, livro_id, meses, valor_total, data_fim]
     );
 
-    // retorna crédito atualizado
     const usuarioAtualizado = await pool.query(
       "SELECT credito FROM Usuarios WHERE id=$1",
       [usuario_id]
@@ -247,8 +280,6 @@ app.post("/alugueis", checar_token, async (req, res) => {
   }
 });
 
-// GET /alugueis — lista aluguéis do usuário logado com dados do livro
-// segundos_restantes é calculado pelo Postgres (sem problema de fuso horário)
 app.get("/alugueis", checar_token, async (req, res) => {
   try {
     const usuario_id = Number(req.usuario.id);
@@ -388,8 +419,6 @@ app.delete("/livros/:id", async (req, res) => {
   }
 });
 
-// DELETE /alugueis/:id — reembolso (apenas nos primeiros 5 minutos)
-// cálculo feito inteiramente no Postgres para evitar problemas de fuso horário
 app.delete("/alugueis/:id", checar_token, async (req, res) => {
   try {
     const usuario_id = Number(req.usuario.id);
@@ -418,16 +447,13 @@ app.delete("/alugueis/:id", checar_token, async (req, res) => {
       );
     }
 
-    // remove aluguel
     await pool.query(`DELETE FROM alugueis WHERE id = $1`, [aluguel_id]);
 
-    // devolve crédito
     await pool.query(
       `UPDATE Usuarios SET credito = credito + $1 WHERE id = $2`,
       [Number(aluguel.valor_total), usuario_id]
     );
 
-    // retorna novo crédito
     const usuarioRes = await pool.query(
       `SELECT credito FROM Usuarios WHERE id = $1`,
       [usuario_id]
@@ -444,4 +470,6 @@ app.delete("/alugueis/:id", checar_token, async (req, res) => {
   }
 });
 
-app.listen(porta, () => console.log(`rodando na porta: ${porta}`));
+inicializarBanco().then(() => {
+  app.listen(porta, () => console.log(`rodando na porta: ${porta}`));
+});
