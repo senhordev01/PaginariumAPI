@@ -119,8 +119,15 @@ app.post("/login", async (req, res) => {
         );
 
         res.json({
-            mensagem: "Login realizado",
-            token
+          mensagem: "Login realizado",
+          token,
+          usuario: {
+            id: usuario.id,
+            nome: usuario.nome,
+            email: usuario.email,
+            credito: usuario.credito,
+            tipo: usuario.tipo
+          }
         });
 
     } catch (erro) {
