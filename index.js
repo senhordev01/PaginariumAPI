@@ -13,11 +13,8 @@ app.use(express.json());
 app.use(cors());
 
 //node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
-//node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-//Mudança feita para a prova de aplicativos nativos
 
 const chave = Buffer.from(process.env.CHAVE_CRYPTO, 'hex');
-
 function checar_token(req, res, next) {
     try {
         const authHeader = req.headers.authorization;
