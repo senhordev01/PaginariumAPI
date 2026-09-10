@@ -348,7 +348,7 @@ app.post("/alugueis", checar_token, async (req, res) => {
     const dataFimISO = dataFim.toISOString().split("T")[0];
 
     const resultado = await pool.query(
-      `INSERT INTO alugueis (usuario_id, livro_id, meses, valor_total, data_inicio, data_fim)
+      `INSERT INTO Alugar (usuario_id, livro_id, meses, valor_total, data_inicio, data_fim)
        VALUES ($1, $2, $3, $4, CURRENT_DATE, $5)
        RETURNING *`,
       [usuario_id, livro_id, meses, valor_total, dataFimISO]
