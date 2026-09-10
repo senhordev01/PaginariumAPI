@@ -231,43 +231,83 @@ app.delete("/usuarios/:id", checar_token, async (req, res) => {
 });
 
 /* Area de Criar Contas Adm*/
-app.post("/admin/login", async (req, res) => {
-  try{
+app.post("/admin/cadastro", async (req, res) => {
+  try {
     const { nome, email, senha } = req.body;
-
-    const admExiste = await pool.query(
-        `
-        SELECT * FROM Administradores
-        WHERE email = $1
-        `,
-        [email]
-    );
-
-    if(admExiste.rows.length > 0){
-      return res.status(409).json("Esse administrador já foi cadastrado")
-    }
+    const admExiste = await pool.query(`SELECT * FROM Administradores WHERE email=$1`, [email]);
+    if (admExiste.rows.length > 0) return res.status(409).json("Esse administrador já foi cadastrado");
 
     const salt = await genSalt(12);
     const senhaHash = await bcrypt.hash(senha, salt);
-
     const resultado = await pool.query(
-      `
-      INSERT INTO Administradores (nome, email, senha)
-      VALUES ($1, $2, $3)
-      RETURNING id, nome, email
-      `,
+      `INSERT INTO Administradores (nome, email, senha) VALUES ($1, $2, $3) RETURNING id, nome, email`,
       [nome, email, senhaHash]
     );
-    res.status(201).json({
-      banco: resultado.rows[0],
-      msg: "Administrador cadastrado com sucesso"
-    });
-  }catch(erro){
+    res.status(201).json({ banco: resultado.rows[0], msg: "Administrador cadastrado com sucesso" });
+  } catch (erro) {
     console.log(erro.message);
     res.status(500).json("erro no servidor");
   }
 });
+/* Login de Administrador */
 
+app.post("/admin/login", async (req, res) => {
+  try {
+    const { email, senha } = req.body;
+
+    if (!email || !senha) {
+      return res.status(422).json("Email e senha obrigatórios");
+    }
+
+    const resultado = await pool.query(
+      `
+      SELECT * FROM Administradores
+      WHERE email = $1
+      `,
+      [email]
+    );
+
+    if (resultado.rows.length === 0) {
+      return res.status(404).json("Administrador não encontrado");
+    }
+
+    const administrador = resultado.rows[0];
+
+    const senhaValida = await bcrypt.compare(
+      senha,
+      administrador.senha
+    );
+
+    if (!senhaValida) {
+      return res.status(401).json("Senha inválida");
+    }
+
+    const token = jwt.sign(
+      {
+        id: administrador.id,
+        email: administrador.email,
+        tipo: "admin"
+      },
+      process.env.CHAVE_TOKEN,
+      { expiresIn: "2h" }
+    );
+
+    res.json({
+      mensagem: "Login de administrador realizado",
+      token,
+      usuario: {
+        id: administrador.id,
+        nome: administrador.nome,
+        email: administrador.email,
+        tipo: "admin"
+      }
+    });
+
+  } catch (erro) {
+    console.log(erro.message);
+    res.status(500).json("Erro no servidor");
+  }
+});
 /*Area do Crud dos Livros*/
 
 // POST
