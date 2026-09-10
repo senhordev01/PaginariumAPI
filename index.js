@@ -6,8 +6,14 @@ import bcrypt, {genSalt} from "bcrypt";
 import jwt from "jsonwebtoken";
 import multer from "multer";
 import crypto from "crypto";
+import { createClient } from "@supabase/supabase-js";
+
 const app = express();
 const porta = 8080;
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SECRET_KEY
+);
 
 app.use(express.json());
 const upload = multer({ storage: multer.memoryStorage() });
@@ -297,179 +303,262 @@ app.post("/admin/cadastro", async (req, res) => {
     res.status(500).json("erro no servidor");
   }
 });
-/* Login de Administrador */
+app.post("/alugueis", checar_token, async (req, res) => {
+  try {
+    const usuario_id = Number(req.usuario.id);
+    const { livro_id, meses } = req.body;
 
-// app.post("/admin/login", async (req, res) => {
-//   try {
-//     const { email, senha } = req.body;
+    if (!livro_id || !meses || meses <= 0) {
+      return res.status(422).json("Dados inválidos");
+    }
 
-//     if (!email || !senha) {
-//       return res.status(422).json("Email e senha obrigatórios");
-//     }
+    const aluguelAtivo = await pool.query(
+      `SELECT 1 FROM alugueis
+       WHERE usuario_id = $1
+         AND livro_id = $2
+         AND data_fim >= CURRENT_DATE`,
+      [usuario_id, livro_id]
+    );
 
-//     const resultado = await pool.query(
-//       `
-//       SELECT * FROM Administradores
-//       WHERE email = $1
-//       `,
-//       [email]
-//     );
+    if (aluguelAtivo.rows.length > 0) {
+      return res.status(409).json("Você já possui este livro alugado e ainda no prazo.");
+    }
 
-//     if (resultado.rows.length === 0) {
-//       return res.status(404).json("Administrador não encontrado");
-//     }
+    const livroRes = await pool.query("SELECT * FROM livros WHERE id=$1", [livro_id]);
+    if (livroRes.rows.length === 0) return res.status(404).json("Livro não encontrado");
+    const livro = livroRes.rows[0];
+    const valor_total = Number(livro.valor) * Number(meses);
 
-//     const administrador = resultado.rows[0];
+    const usuarioRes = await pool.query("SELECT * FROM Usuarios WHERE id=$1", [usuario_id]);
+    if (usuarioRes.rows.length === 0) return res.status(404).json("Usuário não encontrado");
+    const credito_atual = Number(usuarioRes.rows[0].credito);
 
-//     const senhaValida = await bcrypt.compare(
-//       senha,
-//       administrador.senha
-//     );
+    if (credito_atual < valor_total) {
+      return res.status(400).json("Saldo insuficiente");
+    }
 
-//     if (!senhaValida) {
-//       return res.status(401).json("Senha inválida");
-//     }
+    await pool.query(
+      "UPDATE Usuarios SET credito = credito - $1 WHERE id = $2",
+      [valor_total, usuario_id]
+    );
 
-//     const token = jwt.sign(
-//       {
-//         id: administrador.id,
-//         email: administrador.email,
-//         tipo: "admin"
-//       },
-//       process.env.CHAVE_TOKEN,
-//       { expiresIn: "2h" }
-//     );
+    // ✅ Calcula data_fim corretamente em formato YYYY-MM-DD
+    const dataFim = new Date();
+    dataFim.setMonth(dataFim.getMonth() + Number(meses));
+    const dataFimISO = dataFim.toISOString().split("T")[0];
 
-//     res.json({
-//       mensagem: "Login de administrador realizado",
-//       token,
-//       usuario: {
-//         id: administrador.id,
-//         nome: administrador.nome,
-//         email: administrador.email,
-//         tipo: "admin"
-//       }
-//     });
+    const resultado = await pool.query(
+      `INSERT INTO alugueis (usuario_id, livro_id, meses, valor_total, data_inicio, data_fim)
+       VALUES ($1, $2, $3, $4, CURRENT_DATE, $5)
+       RETURNING *`,
+      [usuario_id, livro_id, meses, valor_total, dataFimISO]
+    );
 
-//   } catch (erro) {
-//     console.log(erro.message);
-//     res.status(500).json("Erro no servidor");
-//   }
-// });
-/*Area do Crud dos Livros*/
+    const usuarioAtualizado = await pool.query(
+      "SELECT credito FROM Usuarios WHERE id=$1",
+      [usuario_id]
+    );
+
+    res.status(201).json({
+      aluguel: resultado.rows[0],
+      novo_credito: Number(usuarioAtualizado.rows[0].credito),
+    });
+  } catch (erro) {
+    console.log(erro.message);
+    res.status(500).json("Erro no servidor");
+  }
+});
+
+app.get("/alugueis", checar_token, async (req, res) => {
+  try {
+    const usuario_id = Number(req.usuario.id);
+
+    const resultado = await pool.query(
+      `SELECT
+          a.id,
+          a.livro_id,
+          a.meses,
+          a.valor_total,
+          a.data_inicio,
+          a.data_fim,
+          a.criado_em,
+          l.nome,
+          l.capa_url,
+          l.pdf_url,
+          GREATEST(0, 300 - EXTRACT(EPOCH FROM (NOW() - a.criado_em)))::int AS segundos_restantes
+       FROM alugueis a
+       JOIN livros l ON l.id = a.livro_id
+       WHERE a.usuario_id = $1
+       ORDER BY a.data_fim DESC`,
+      [usuario_id]
+    );
+
+    res.json(resultado.rows);
+  } catch (erro) {
+    console.log(erro.message);
+    res.status(500).json("Erro no servidor");
+  }
+});
 
 // POST
-app.post("/livros", upload.fields([{ name: "capa", maxCount: 1 }, {name:"pdf", maxCount: 1 }]), async (req, res) => {
+app.post("/livros", upload.any(), async (req, res) => {
   try {
     const { nome, genero, valor } = req.body;
+    const capa = req.files?.find(f => f.fieldname === "capa");
+    const pdf = req.files?.find(f => f.fieldname === "pdf");
+    const valorNumber = Number(valor);
 
-    if (!nome || !genero) {
-      return res.status(422).json("Campos obrigatórios faltando");
-    }
+    if (!Number.isFinite(valorNumber)) return res.status(422).json("Valor inválido");
+    if (!nome || !genero) return res.status(422).json("Nome e gênero são obrigatórios");
+    if (!capa || !pdf || !capa.buffer || !pdf.buffer) return res.status(422).json("Capa e PDF são obrigatórios");
 
-    const livroExiste = await pool.query(
-      `
-      SELECT * FROM livros
-      WHERE nome = $1
-      `,
-      [nome]
-    );
+    const livroExiste = await pool.query(`SELECT 1 FROM livros WHERE nome=$1`, [nome]);
+    if (livroExiste.rows.length > 0) return res.status(409).json("Esse livro já foi cadastrado!");
 
-    if (livroExiste.rows.length > 0) {
-      return res.status(409).json("Esse livro ja foi cadastrado!");
-    }
+    const sanitize = (name) =>
+      name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9.-]/g, "-");
+
+    const nomeCapa = `${Date.now()}-${sanitize(capa.originalname)}`;
+    const nomePdf = `${Date.now()}-${sanitize(pdf.originalname)}`;
+
+    const { error: erroCapa } = await supabase.storage.from("capas").upload(nomeCapa, capa.buffer, { contentType: capa.mimetype });
+    if (erroCapa) { console.log("ERRO CAPA:", erroCapa); return res.status(500).json(erroCapa.message); }
+
+    const { error: erroPdf } = await supabase.storage.from("Livros").upload(nomePdf, pdf.buffer, { contentType: pdf.mimetype });
+    if (erroPdf) { console.log("ERRO PDF:", erroPdf); return res.status(500).json(erroPdf.message); }
+
+    const capaUrl = supabase.storage.from("capas").getPublicUrl(nomeCapa).data.publicUrl;
+    const pdfUrl = supabase.storage.from("Livros").getPublicUrl(nomePdf).data.publicUrl;
 
     const resultado = await pool.query(
-      `
-      INSERT INTO livros (nome, genero, valor, capa_url, pdf_url)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING *
-      `,
-      [
-        nome,
-        genero,
-        Number(valor),
-        "temporario",
-        "temporario"
-      ]
+      `INSERT INTO livros (nome, genero, capa_url, pdf_url, valor) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [nome, genero, capaUrl, pdfUrl, valorNumber]
     );
-    res.status(201).json({banco: resultado.rows[0], msg:"livro inserido com sucesso"});
+
+    return res.status(201).json({ livro: resultado.rows[0], msg: "Livro inserido com sucesso" });
   } catch (erro) {
-    res.status(500).json({ erro: erro.message });
+    console.log("ERRO /livros:", erro);
+    return res.status(500).json({ erro: erro.message });
   }
 });
 
-
-// GET
 app.get("/livros", async (req, res) => {
   try {
-    const resultado = await pool.query(
-      `
-      SELECT * FROM livros
-      ORDER BY id
-      `
-    );
-
+    const resultado = await pool.query(`SELECT * FROM livros ORDER BY id`);
     res.status(200).json(resultado.rows);
-
   } catch (erro) {
     res.status(500).json({ erro: erro.message });
   }
 });
 
-
-// PUT
-app.put("/livros/:id", async (req, res) => {
+app.put("/livros/:id", upload.any(), async (req, res) => {
   try {
-    const { nome, genero } = req.body;
     const { id } = req.params;
+    const { nome, genero, valor } = req.body;
+    const capa = req.files?.find(f => f.fieldname === "capa");
+    const pdf = req.files?.find(f => f.fieldname === "pdf");
+    const valorNumber = Number(valor);
 
-    const resultado = await pool.query(
-      `
-      UPDATE livros
-      SET nome = $1, genero = $2
-      WHERE id = $3
-      RETURNING *
-      `,
-      [nome, genero, id]
-    );
+    if (!Number.isFinite(valorNumber)) return res.status(422).json("Valor inválido");
 
-    if (resultado.rows.length === 0) {
-      return res.status(404).json("Livro não encontrado");
+    const livroAtual = await pool.query("SELECT * FROM livros WHERE id=$1", [id]);
+    if (livroAtual.rows.length === 0) return res.status(404).json("Livro não encontrado");
+
+    let capaUrl = livroAtual.rows[0].capa_url;
+    let pdfUrl = livroAtual.rows[0].pdf_url;
+
+    const sanitize = (name) =>
+      name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9.-]/g, "-");
+
+    if (capa) {
+      const nomeCapa = `${Date.now()}-${sanitize(capa.originalname)}`;
+      const { error } = await supabase.storage.from("capas").upload(nomeCapa, capa.buffer, { contentType: capa.mimetype });
+      if (error) return res.status(500).json(error.message);
+      capaUrl = supabase.storage.from("capas").getPublicUrl(nomeCapa).data.publicUrl;
     }
 
-    res.json(resultado.rows[0]);
+    if (pdf) {
+      const nomePdf = `${Date.now()}-${sanitize(pdf.originalname)}`;
+      const { error } = await supabase.storage.from("Livros").upload(nomePdf, pdf.buffer, { contentType: pdf.mimetype });
+      if (error) return res.status(500).json(error.message);
+      pdfUrl = supabase.storage.from("Livros").getPublicUrl(nomePdf).data.publicUrl;
+    }
 
+    const resultado = await pool.query(
+      `UPDATE livros SET nome=$1, genero=$2, capa_url=$3, pdf_url=$4, valor=$5 WHERE id=$6 RETURNING *`,
+      [nome, genero, capaUrl, pdfUrl, valorNumber, id]
+    );
+
+    return res.json(resultado.rows[0]);
   } catch (erro) {
-    res.status(500).json({ erro: erro.message });
+    console.log(erro);
+    return res.status(500).json({ erro: erro.message });
   }
 });
 
-
-// DELETE
 app.delete("/livros/:id", async (req, res) => {
   try {
     const { id } = req.params;
-
-    const resultado = await pool.query(
-      `
-      DELETE FROM livros
-      WHERE id = $1
-      RETURNING *
-      `,
-      [id]
-    );
-
-    if (resultado.rows.length === 0) {
-      return res.status(404).json("Livro não encontrado");
-    }
-
+    const resultado = await pool.query(`DELETE FROM livros WHERE id=$1 RETURNING *`, [id]);
+    if (resultado.rows.length === 0) return res.status(404).json("Livro não encontrado");
     res.json(resultado.rows[0]);
-
   } catch (erro) {
     res.status(500).json({ erro: erro.message });
   }
 });
+
+app.delete("/alugueis/:id", checar_token, async (req, res) => {
+  try {
+    const usuario_id = Number(req.usuario.id);
+    const aluguel_id = Number(req.params.id);
+
+    const aluguelRes = await pool.query(
+      `SELECT *,
+              EXTRACT(EPOCH FROM (NOW() - criado_em)) / 60 AS minutos_decorridos
+       FROM alugueis
+       WHERE id = $1 AND usuario_id = $2`,
+      [aluguel_id, usuario_id]
+    );
+
+    if (aluguelRes.rows.length === 0) {
+      return res.status(404).json("Aluguel não encontrado");
+    }
+
+    const aluguel = aluguelRes.rows[0];
+    const diferencaMinutos = Number(aluguel.minutos_decorridos);
+
+    console.log("MINUTOS DECORRIDOS (pg):", diferencaMinutos);
+
+    if (diferencaMinutos > 5) {
+      return res.status(403).json(
+        `Prazo encerrado. Já passaram ${diferencaMinutos.toFixed(2)} minutos.`
+      );
+    }
+
+    await pool.query(`DELETE FROM alugueis WHERE id = $1`, [aluguel_id]);
+
+    await pool.query(
+      `UPDATE Usuarios SET credito = credito + $1 WHERE id = $2`,
+      [Number(aluguel.valor_total), usuario_id]
+    );
+
+    const usuarioRes = await pool.query(
+      `SELECT credito FROM Usuarios WHERE id = $1`,
+      [usuario_id]
+    );
+
+    res.json({
+      msg: "Reembolso realizado com sucesso",
+      novo_credito: Number(usuarioRes.rows[0].credito),
+    });
+
+  } catch (erro) {
+    console.log(erro.message);
+    res.status(500).json("Erro no servidor");
+  }
+});
+
+
 
 app.listen(porta, () => {
   console.log(`rodando na porta ${porta}`);
