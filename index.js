@@ -245,7 +245,7 @@ app.post("/admin/cadastro", async (req, res) => {
     );
     res.status(201).json({ banco: resultado.rows[0], msg: "Administrador cadastrado com sucesso" });
   } catch (erro) {
-    console.log(erro.message);
+    console.log("ERRO ADMIN:", erro.message);
     res.status(500).json("erro no servidor");
   }
 });
