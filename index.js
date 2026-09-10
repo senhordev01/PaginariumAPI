@@ -4,11 +4,13 @@ import cors from "cors";
 import pool from "./db.js";
 import bcrypt, {genSalt} from "bcrypt";
 import jwt from "jsonwebtoken";
+import multer from "multer";
 import crypto from "crypto";
 const app = express();
 const porta = 8080;
 
 app.use(express.json());
+const upload = multer({ storage: multer.memoryStorage() });
 app.use(cors());
 
 //node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
@@ -357,7 +359,7 @@ app.post("/admin/cadastro", async (req, res) => {
 /*Area do Crud dos Livros*/
 
 // POST
-app.post("/livros", async (req, res) => {
+app.post("/livros", upload.fields([{ name: "capa", maxCount: 1 }, {name:"pdf", maxCount: 1 }]), async (req, res) => {
   try {
     const { nome, genero } = req.body;
 
