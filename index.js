@@ -386,7 +386,7 @@ app.get("/alugueis", checar_token, async (req, res) => {
           l.capa_url,
           l.pdf_url,
           GREATEST(0, 300 - EXTRACT(EPOCH FROM (NOW() - a.criado_em)))::int AS segundos_restantes
-       FROM alugueis a
+       FROM Alugar a
        JOIN livros l ON l.id = a.livro_id
        WHERE a.usuario_id = $1
        ORDER BY a.data_fim DESC`,
