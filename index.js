@@ -22,7 +22,6 @@ app.use(cors());
 //node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 
 //API do Paginarium
-//API do Paginarium é uma aplicação que fornece funcionalidades para cadastro de usuários, login, gerenciamento de livros e aluguel de livros. Ela utiliza Express.js para criar rotas HTTP, PostgreSQL como banco de dados, bcrypt para hashing de senhas, JWT para autenticação e Supabase para armazenamento de arquivos.
 
 const chave = Buffer.from(process.env.CHAVE_CRYPTO, 'hex');
 function checar_token(req, res, next) {
