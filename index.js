@@ -396,8 +396,8 @@ app.get("/alugueis", checar_token, async (req, res) => {
 
     res.json(resultado.rows);
   } catch (erro) {
-    console.log(erro.message);
-    res.status(500).json("Erro no servidor");
+    console.log("ERRO GET /alugueis:", erro);
+    res.status(500).json({ erro: erro.message});
   }
 });
 
