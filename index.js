@@ -361,11 +361,12 @@ app.post("/admin/cadastro", async (req, res) => {
 // POST
 app.post("/livros", upload.fields([{ name: "capa", maxCount: 1 }, {name:"pdf", maxCount: 1 }]), async (req, res) => {
   try {
-    const { nome, genero } = req.body;
+    const { nome, genero, valor } = req.body;
 
     if (!nome || !genero) {
       return res.status(422).json("Campos obrigatórios faltando");
     }
+
     const livroExiste = await pool.query(
       `
       SELECT * FROM livros
@@ -374,19 +375,24 @@ app.post("/livros", upload.fields([{ name: "capa", maxCount: 1 }, {name:"pdf", m
       [nome]
     );
 
-    if(livroExiste.rows.length > 0){
-        return res.status(409).json("Esse livro ja foi cadastrado!");
+    if (livroExiste.rows.length > 0) {
+      return res.status(409).json("Esse livro ja foi cadastrado!");
     }
+
     const resultado = await pool.query(
       `
-      INSERT INTO livros (nome, genero)
-      VALUES ($1, $2)
+      INSERT INTO livros (nome, genero, valor, capa_url, pdf_url)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING *
       `,
-      [nome, genero]
+      [
+        nome,
+        genero,
+        Number(valor),
+        "temporario",
+        "temporario"
+      ]
     );
-
-
     res.status(201).json({banco: resultado.rows[0], msg:"livro inserido com sucesso"});
   } catch (erro) {
     res.status(500).json({ erro: erro.message });
