@@ -8,11 +8,12 @@ import crypto from "crypto";
 const app = express();
 const porta = 8080;
 
-
 app.use(express.json());
 app.use(cors());
 
 //node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
+
+//API do Paginarium
 
 const chave = Buffer.from(process.env.CHAVE_CRYPTO, 'hex');
 function checar_token(req, res, next) {
