@@ -22,6 +22,7 @@ app.use(cors());
 //node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 
 //API do Paginarium
+//API do Paginarium é uma aplicação que fornece funcionalidades para cadastro de usuários, login, gerenciamento de livros e aluguel de livros. Ela utiliza Express.js para criar rotas HTTP, PostgreSQL como banco de dados, bcrypt para hashing de senhas, JWT para autenticação e Supabase para armazenamento de arquivos.
 
 const chave = Buffer.from(process.env.CHAVE_CRYPTO, 'hex');
 function checar_token(req, res, next) {
@@ -313,7 +314,7 @@ app.post("/alugueis", checar_token, async (req, res) => {
     }
 
     const aluguelAtivo = await pool.query(
-      `SELECT 1 FROM alugueis
+      `SELECT 1 FROM Alugar
        WHERE usuario_id = $1
          AND livro_id = $2
          AND data_fim >= CURRENT_DATE`,
@@ -324,7 +325,7 @@ app.post("/alugueis", checar_token, async (req, res) => {
       return res.status(409).json("Você já possui este livro alugado e ainda no prazo.");
     }
 
-    const livroRes = await pool.query("SELECT * FROM livros WHERE id=$1", [livro_id]);
+    const livroRes = await pool.query("SELECT * FROM Livros WHERE id=$1", [livro_id]);
     if (livroRes.rows.length === 0) return res.status(404).json("Livro não encontrado");
     const livro = livroRes.rows[0];
     const valor_total = Number(livro.valor) * Number(meses);
@@ -515,7 +516,7 @@ app.delete("/alugueis/:id", checar_token, async (req, res) => {
     const aluguelRes = await pool.query(
       `SELECT *,
               EXTRACT(EPOCH FROM (NOW() - criado_em)) / 60 AS minutos_decorridos
-       FROM alugueis
+       FROM Alugar
        WHERE id = $1 AND usuario_id = $2`,
       [aluguel_id, usuario_id]
     );
@@ -535,7 +536,7 @@ app.delete("/alugueis/:id", checar_token, async (req, res) => {
       );
     }
 
-    await pool.query(`DELETE FROM alugueis WHERE id = $1`, [aluguel_id]);
+    await pool.query(`DELETE FROM Alugar WHERE id = $1`, [aluguel_id]);
 
     await pool.query(
       `UPDATE Usuarios SET credito = credito + $1 WHERE id = $2`,
