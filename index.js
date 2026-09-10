@@ -90,51 +90,97 @@ app.post("/cadastro", async (req, res) => {
 /*Area de Login no Sistema*/
 
 app.post("/login", async (req, res) => {
-    try {
-        const { email, senha } = req.body;
+  try {
+    const { email, senha } = req.body;
 
-        if (!email || !senha) {
-            return res.status(422).json("Email e senha obrigatórios");
-        }
-
-        const resultado = await pool.query(
-            "SELECT * FROM Usuarios WHERE email=$1",
-            [email]
-        );
-
-        if (resultado.rows.length === 0) {
-            return res.status(404).json("Usuário não encontrado");
-        }
-
-        const usuario = resultado.rows[0];
-        const senhaValida = await bcrypt.compare(senha, usuario.senha);
-
-        if (!senhaValida) {
-            return res.status(401).json("Senha inválida");
-        }
-
-        const token = jwt.sign(
-            { id: usuario.id, email: usuario.email },
-            process.env.CHAVE_TOKEN,
-            { expiresIn: "2h" }
-        );
-
-        res.json({
-          mensagem: "Login realizado",
-          token,
-          usuario: {
-            id: usuario.id,
-            nome: usuario.nome,
-            email: usuario.email,
-            credito: usuario.credito,
-            tipo: usuario.tipo
-          }
-        });
-
-    } catch (erro) {
-        console.log(erro.message);
-        res.status(500).json("Erro no servidor");
+    if (!email || !senha) {
+      return res.status(422).json("Email e senha obrigatórios");
     }
+
+    // Primeiro procura usuário normal
+    let resultado = await pool.query(
+      "SELECT * FROM Usuarios WHERE email=$1",
+      [email]
+    );
+
+    if (resultado.rows.length > 0) {
+      const usuario = resultado.rows[0];
+
+      const senhaValida = await bcrypt.compare(senha, usuario.senha);
+
+      if (!senhaValida) {
+        return res.status(401).json("Senha inválida");
+      }
+
+      const token = jwt.sign(
+        {
+          id: usuario.id,
+          email: usuario.email,
+          tipo: "normal"
+        },
+        process.env.CHAVE_TOKEN,
+        { expiresIn: "2h" }
+      );
+
+      return res.json({
+        mensagem: "Login realizado",
+        token,
+        usuario: {
+          id: usuario.id,
+          nome: usuario.nome,
+          email: usuario.email,
+          credito: usuario.credito,
+          tipo: "normal"
+        }
+      });
+    }
+
+    // Se não encontrou usuário, procura administrador
+    resultado = await pool.query(
+      "SELECT * FROM Administradores WHERE email=$1",
+      [email]
+    );
+
+    if (resultado.rows.length > 0) {
+      const administrador = resultado.rows[0];
+
+      const senhaValida = await bcrypt.compare(
+        senha,
+        administrador.senha
+      );
+
+      if (!senhaValida) {
+        return res.status(401).json("Senha inválida");
+      }
+
+      const token = jwt.sign(
+        {
+          id: administrador.id,
+          email: administrador.email,
+          tipo: "admin"
+        },
+        process.env.CHAVE_TOKEN,
+        { expiresIn: "2h" }
+      );
+
+      return res.json({
+        mensagem: "Login de administrador realizado",
+        token,
+        usuario: {
+          id: administrador.id,
+          nome: administrador.nome,
+          email: administrador.email,
+          tipo: "admin"
+        }
+      });
+    }
+
+    return res.status(404).json("Usuário não encontrado");
+
+  } catch (erro) {
+    console.log("ERRO LOGIN:", erro.message);
+    res.status(500).json("Erro no servidor");
+  }
 });
 
 function verificarAcesso(req, id) {
@@ -251,63 +297,63 @@ app.post("/admin/cadastro", async (req, res) => {
 });
 /* Login de Administrador */
 
-app.post("/admin/login", async (req, res) => {
-  try {
-    const { email, senha } = req.body;
+// app.post("/admin/login", async (req, res) => {
+//   try {
+//     const { email, senha } = req.body;
 
-    if (!email || !senha) {
-      return res.status(422).json("Email e senha obrigatórios");
-    }
+//     if (!email || !senha) {
+//       return res.status(422).json("Email e senha obrigatórios");
+//     }
 
-    const resultado = await pool.query(
-      `
-      SELECT * FROM Administradores
-      WHERE email = $1
-      `,
-      [email]
-    );
+//     const resultado = await pool.query(
+//       `
+//       SELECT * FROM Administradores
+//       WHERE email = $1
+//       `,
+//       [email]
+//     );
 
-    if (resultado.rows.length === 0) {
-      return res.status(404).json("Administrador não encontrado");
-    }
+//     if (resultado.rows.length === 0) {
+//       return res.status(404).json("Administrador não encontrado");
+//     }
 
-    const administrador = resultado.rows[0];
+//     const administrador = resultado.rows[0];
 
-    const senhaValida = await bcrypt.compare(
-      senha,
-      administrador.senha
-    );
+//     const senhaValida = await bcrypt.compare(
+//       senha,
+//       administrador.senha
+//     );
 
-    if (!senhaValida) {
-      return res.status(401).json("Senha inválida");
-    }
+//     if (!senhaValida) {
+//       return res.status(401).json("Senha inválida");
+//     }
 
-    const token = jwt.sign(
-      {
-        id: administrador.id,
-        email: administrador.email,
-        tipo: "admin"
-      },
-      process.env.CHAVE_TOKEN,
-      { expiresIn: "2h" }
-    );
+//     const token = jwt.sign(
+//       {
+//         id: administrador.id,
+//         email: administrador.email,
+//         tipo: "admin"
+//       },
+//       process.env.CHAVE_TOKEN,
+//       { expiresIn: "2h" }
+//     );
 
-    res.json({
-      mensagem: "Login de administrador realizado",
-      token,
-      usuario: {
-        id: administrador.id,
-        nome: administrador.nome,
-        email: administrador.email,
-        tipo: "admin"
-      }
-    });
+//     res.json({
+//       mensagem: "Login de administrador realizado",
+//       token,
+//       usuario: {
+//         id: administrador.id,
+//         nome: administrador.nome,
+//         email: administrador.email,
+//         tipo: "admin"
+//       }
+//     });
 
-  } catch (erro) {
-    console.log(erro.message);
-    res.status(500).json("Erro no servidor");
-  }
-});
+//   } catch (erro) {
+//     console.log(erro.message);
+//     res.status(500).json("Erro no servidor");
+//   }
+// });
 /*Area do Crud dos Livros*/
 
 // POST
