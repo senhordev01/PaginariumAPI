@@ -4,15 +4,30 @@ import cors from "cors";
 import pool from "./db.js";
 import bcrypt, { genSalt } from "bcrypt";
 import jwt from "jsonwebtoken";
+<<<<<<< HEAD
 import supabase from "./supabase.js";
 import multer from "multer";
 
 const app = express();
 const porta = 8080;
+=======
+import multer from "multer";
+import crypto from "crypto";
+import { createClient } from "@supabase/supabase-js";
+
+const app = express();
+const porta = 8080;
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SECRET_KEY
+);
+>>>>>>> 3fc06ae (Commit da atualizaçao de dados e Saldo de credito)
 
 app.use(express.json());
+const upload = multer({ storage: multer.memoryStorage() });
 app.use(cors());
 
+<<<<<<< HEAD
 const upload = multer({ storage: multer.memoryStorage() });
 
 async function inicializarBanco() {
@@ -58,7 +73,13 @@ async function inicializarBanco() {
     console.error("Erro ao criar tabelas:", erro.message);
   }
 }
+=======
+//node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 
+//API do Paginarium
+>>>>>>> 3fc06ae (Commit da atualizaçao de dados e Saldo de credito)
+
+const chave = Buffer.from(process.env.CHAVE_CRYPTO, 'hex');
 function checar_token(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
@@ -472,6 +493,576 @@ app.delete("/alugueis/:id", checar_token, async (req, res) => {
   }
 });
 
+<<<<<<< HEAD
 inicializarBanco().then(() => {
   app.listen(porta, () => console.log(`rodando na porta: ${porta}`));
+=======
+/*Area de Login no Sistema*/
+
+app.post("/login", async (req, res) => {
+  try {
+    const { email, senha } = req.body;
+
+    if (!email || !senha) {
+      return res.status(422).json("Email e senha obrigatórios");
+    }
+
+    // Primeiro procura usuário normal
+    let resultado = await pool.query(
+      "SELECT * FROM Usuarios WHERE email=$1",
+      [email]
+    );
+
+    if (resultado.rows.length > 0) {
+      const usuario = resultado.rows[0];
+
+      const senhaValida = await bcrypt.compare(senha, usuario.senha);
+
+      if (!senhaValida) {
+        return res.status(401).json("Senha inválida");
+      }
+
+      const token = jwt.sign(
+        {
+          id: usuario.id,
+          email: usuario.email,
+          tipo: "normal"
+        },
+        process.env.CHAVE_TOKEN,
+        { expiresIn: "2h" }
+      );
+
+      return res.json({
+        mensagem: "Login realizado",
+        token,
+        usuario: {
+          id: usuario.id,
+          nome: usuario.nome,
+          email: usuario.email,
+          credito: usuario.credito,
+          tipo: "normal"
+        }
+      });
+    }
+
+    // Se não encontrou usuário, procura administrador
+    resultado = await pool.query(
+      "SELECT * FROM Administradores WHERE email=$1",
+      [email]
+    );
+
+    if (resultado.rows.length > 0) {
+      const administrador = resultado.rows[0];
+
+      const senhaValida = await bcrypt.compare(
+        senha,
+        administrador.senha
+      );
+
+      if (!senhaValida) {
+        return res.status(401).json("Senha inválida");
+      }
+
+      const token = jwt.sign(
+        {
+          id: administrador.id,
+          email: administrador.email,
+          tipo: "admin"
+        },
+        process.env.CHAVE_TOKEN,
+        { expiresIn: "2h" }
+      );
+
+      return res.json({
+        mensagem: "Login de administrador realizado",
+        token,
+        usuario: {
+          id: administrador.id,
+          nome: administrador.nome,
+          email: administrador.email,
+          tipo: "admin"
+        }
+      });
+    }
+
+    return res.status(404).json("Usuário não encontrado");
+
+  } catch (erro) {
+    console.log("ERRO LOGIN:", erro.message);
+    res.status(500).json("Erro no servidor");
+  }
+});
+
+function verificarAcesso(req, id) {
+    return Number(req.usuario.id) === Number(id);
+}
+
+// Dono da conta de usuário comum. Administradores têm ids de outra
+// tabela, então o tipo precisa ser conferido para não haver colisão.
+function ehDonoDaConta(req, id) {
+    return req.usuario?.tipo === "normal" && verificarAcesso(req, id);
+}
+
+const CREDITO_MAXIMO_POR_RECARGA = 1000;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+app.get("/usuarios/:id", checar_token, async (req, res) => {
+    try {
+
+        console.log("REQ.USUARIO:", req.usuario);
+        console.log("PARAM ID:", req.params.id);
+
+        const { id } = req.params;
+
+        if (!verificarAcesso(req, id)) {
+            return res.status(403).json("Acesso negado");
+        }
+
+        const resultado = await pool.query(
+            "SELECT * FROM Usuarios WHERE id=$1",
+            [id]
+        );
+
+        if (resultado.rows.length === 0) {
+            return res.status(404).json("Usuário não encontrado");
+        }
+
+        // Nunca devolve o hash da senha para o cliente.
+        const { senha, ...usuario } = resultado.rows[0];
+
+        res.json(usuario);
+
+    } catch (erro) {
+        console.log(erro.message);
+        res.status(500).json("Erro no servidor");
+    }
+});
+
+// Atualização parcial: envie só "nome", só "email" ou os dois.
+app.put("/usuarios/:id", checar_token, async (req, res) => {
+    try {
+        const paramID = Number(req.params.id);
+
+        if (!ehDonoDaConta(req, paramID)) {
+            return res.status(403).json("Acesso negado");
+        }
+
+        let { nome, email } = req.body || {};
+
+        if (nome === undefined && email === undefined) {
+            return res.status(422).json("Envie o nome e/ou o e-mail para atualizar");
+        }
+
+        if (nome !== undefined) {
+            nome = String(nome).trim().replace(/\s+/g, " ");
+            if (nome.length < 2 || nome.length > 100) {
+                return res.status(422).json("O nome deve ter entre 2 e 100 caracteres");
+            }
+        }
+
+        if (email !== undefined) {
+            email = String(email).trim().toLowerCase();
+            if (!EMAIL_REGEX.test(email) || email.length > 150) {
+                return res.status(422).json("E-mail inválido");
+            }
+
+            const emailEmUso = await pool.query(
+                "SELECT 1 FROM Usuarios WHERE email=$1 AND id<>$2",
+                [email, paramID]
+            );
+
+            if (emailEmUso.rows.length > 0) {
+                return res.status(409).json("Esse e-mail já está em uso");
+            }
+        }
+
+        // COALESCE mantém o valor atual quando o campo não foi enviado.
+        const resultado = await pool.query(
+            `UPDATE Usuarios
+                SET nome  = COALESCE($1, nome),
+                    email = COALESCE($2, email)
+              WHERE id = $3
+          RETURNING id, nome, email, credito`,
+            [nome ?? null, email ?? null, paramID]
+        );
+
+        if (resultado.rowCount === 0) {
+            return res.status(404).json("Usuário não encontrado");
+        }
+
+        const atualizado = resultado.rows[0];
+
+        res.status(200).json({
+            msg: "Usuário Atualizado!",
+            id: atualizado.id,
+            nome: atualizado.nome,
+            email: atualizado.email,
+            credito: Number(atualizado.credito),
+        });
+
+    } catch (erro) {
+        console.log(erro.message);
+        res.status(500).json("Erro no servidor");
+    }
+});
+
+// Adicionar créditos ao saldo do próprio usuário.
+// body: { valor }  ->  { msg, novo_credito }
+app.post("/usuarios/:id/creditos", checar_token, async (req, res) => {
+    try {
+        const paramID = Number(req.params.id);
+
+        if (!ehDonoDaConta(req, paramID)) {
+            return res.status(403).json("Acesso negado");
+        }
+
+        const bruto = req.body?.valor;
+
+        if (
+            (typeof bruto !== "number" && typeof bruto !== "string") ||
+            String(bruto).trim() === ""
+        ) {
+            return res.status(422).json("Valor inválido");
+        }
+
+        const valor = Math.round(Number(bruto) * 100) / 100;
+
+        if (!Number.isFinite(valor) || valor <= 0 || valor > CREDITO_MAXIMO_POR_RECARGA) {
+            return res
+                .status(422)
+                .json(`Informe um valor entre 0,01 e ${CREDITO_MAXIMO_POR_RECARGA}`);
+        }
+
+        // Soma feita no banco, de forma atômica.
+        const resultado = await pool.query(
+            `UPDATE Usuarios
+                SET credito = credito + $1
+              WHERE id = $2
+          RETURNING credito`,
+            [valor, paramID]
+        );
+
+        if (resultado.rowCount === 0) {
+            return res.status(404).json("Usuário não encontrado");
+        }
+
+        res.status(200).json({
+            msg: "Créditos adicionados com sucesso",
+            novo_credito: Number(resultado.rows[0].credito),
+        });
+
+    } catch (erro) {
+        console.log("ERRO CRÉDITOS:", erro.message);
+        res.status(500).json("Erro no servidor");
+    }
+});
+
+app.delete("/usuarios/:id", checar_token, async (req, res) => {
+    try {
+        const paramID = Number(req.params.id);
+        const id = Number(req.usuario.id);
+
+        console.log("ID TOKEN:", id);
+        console.log("ID URL:", paramID);
+        
+        if (id !== paramID) {
+            return res.status(403).json("Acesso negado");
+        }
+
+        const resultado = await pool.query(
+            "DELETE FROM Usuarios WHERE id=$1 RETURNING id",
+            [paramID]
+        );
+
+        if (resultado.rowCount === 0) {
+            return res.status(404).json("Usuário não encontrado");
+        }
+
+        res.status(200).json("Usuário deletado");
+
+    } catch (erro) {
+        console.log("DELETE ERROR:", erro.message);
+        res.status(500).json("Erro no servidor");
+    }
+});
+
+/* Area de Criar Contas Adm*/
+app.post("/admin/cadastro", async (req, res) => {
+  try {
+    const { nome, email, senha } = req.body;
+    const admExiste = await pool.query(`SELECT * FROM Administradores WHERE email=$1`, [email]);
+    if (admExiste.rows.length > 0) return res.status(409).json("Esse administrador já foi cadastrado");
+
+    const salt = await genSalt(12);
+    const senhaHash = await bcrypt.hash(senha, salt);
+    const resultado = await pool.query(
+      `INSERT INTO Administradores (nome, email, senha) VALUES ($1, $2, $3) RETURNING id, nome, email`,
+      [nome, email, senhaHash]
+    );
+    res.status(201).json({ banco: resultado.rows[0], msg: "Administrador cadastrado com sucesso" });
+  } catch (erro) {
+    console.log("ERRO ADMIN:", erro.message);
+    res.status(500).json("erro no servidor");
+  }
+});
+app.post("/alugueis", checar_token, async (req, res) => {
+  try {
+    const usuario_id = Number(req.usuario.id);
+    const { livro_id, meses } = req.body;
+
+    if (!livro_id || !meses || meses <= 0) {
+      return res.status(422).json("Dados inválidos");
+    }
+
+    const aluguelAtivo = await pool.query(
+      `SELECT 1 FROM Alugar
+       WHERE usuario_id = $1
+         AND livro_id = $2
+         AND data_fim >= CURRENT_DATE`,
+      [usuario_id, livro_id]
+    );
+
+    if (aluguelAtivo.rows.length > 0) {
+      return res.status(409).json("Você já possui este livro alugado e ainda no prazo.");
+    }
+
+    const livroRes = await pool.query("SELECT * FROM Livros WHERE id=$1", [livro_id]);
+    if (livroRes.rows.length === 0) return res.status(404).json("Livro não encontrado");
+    const livro = livroRes.rows[0];
+    const valor_total = Number(livro.valor) * Number(meses);
+
+    const usuarioRes = await pool.query("SELECT * FROM Usuarios WHERE id=$1", [usuario_id]);
+    if (usuarioRes.rows.length === 0) return res.status(404).json("Usuário não encontrado");
+    const credito_atual = Number(usuarioRes.rows[0].credito);
+
+    if (credito_atual < valor_total) {
+      return res.status(400).json("Saldo insuficiente");
+    }
+
+    await pool.query(
+      "UPDATE Usuarios SET credito = credito - $1 WHERE id = $2",
+      [valor_total, usuario_id]
+    );
+
+    // ✅ Calcula data_fim corretamente em formato YYYY-MM-DD
+    const dataFim = new Date();
+    dataFim.setMonth(dataFim.getMonth() + Number(meses));
+    const dataFimISO = dataFim.toISOString().split("T")[0];
+
+    const resultado = await pool.query(
+      `INSERT INTO Alugar (usuario_id, livro_id, meses, valor_total, data_inicio, data_fim)
+       VALUES ($1, $2, $3, $4, CURRENT_DATE, $5)
+       RETURNING *`,
+      [usuario_id, livro_id, meses, valor_total, dataFimISO]
+    );
+
+    const usuarioAtualizado = await pool.query(
+      "SELECT credito FROM Usuarios WHERE id=$1",
+      [usuario_id]
+    );
+
+    res.status(201).json({
+      aluguel: resultado.rows[0],
+      novo_credito: Number(usuarioAtualizado.rows[0].credito),
+    });
+  } catch (erro) {
+    console.log(erro.message);
+    res.status(500).json("Erro no servidor");
+  }
+});
+
+app.get("/alugueis", checar_token, async (req, res) => {
+  try {
+    const usuario_id = Number(req.usuario.id);
+
+    const resultado = await pool.query(
+      `SELECT
+          a.id,
+          a.livro_id,
+          a.meses,
+          a.valor_total,
+          a.data_inicio,
+          a.data_fim,
+          a.criado_em,
+          l.nome,
+          l.capa_url,
+          l.pdf_url,
+          GREATEST(0, 300 - EXTRACT(EPOCH FROM (NOW() - a.criado_em)))::int AS segundos_restantes
+       FROM Alugar a
+       JOIN livros l ON l.id = a.livro_id
+       WHERE a.usuario_id = $1
+       ORDER BY a.data_fim DESC`,
+      [usuario_id]
+    );
+
+    res.json(resultado.rows);
+  } catch (erro) {
+    console.log("ERRO GET /alugueis:", erro);
+    res.status(500).json({ erro: erro.message});
+  }
+});
+
+// POST
+app.post("/livros", upload.any(), async (req, res) => {
+  try {
+    const { nome, genero, valor } = req.body;
+    const capa = req.files?.find(f => f.fieldname === "capa");
+    const pdf = req.files?.find(f => f.fieldname === "pdf");
+    const valorNumber = Number(valor);
+
+    if (!Number.isFinite(valorNumber)) return res.status(422).json("Valor inválido");
+    if (!nome || !genero) return res.status(422).json("Nome e gênero são obrigatórios");
+    if (!capa || !pdf || !capa.buffer || !pdf.buffer) return res.status(422).json("Capa e PDF são obrigatórios");
+
+    const livroExiste = await pool.query(`SELECT 1 FROM livros WHERE nome=$1`, [nome]);
+    if (livroExiste.rows.length > 0) return res.status(409).json("Esse livro já foi cadastrado!");
+
+    const sanitize = (name) =>
+      name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9.-]/g, "-");
+
+    const nomeCapa = `${Date.now()}-${sanitize(capa.originalname)}`;
+    const nomePdf = `${Date.now()}-${sanitize(pdf.originalname)}`;
+
+    const { error: erroCapa } = await supabase.storage.from("capas").upload(nomeCapa, capa.buffer, { contentType: capa.mimetype });
+    if (erroCapa) { console.log("ERRO CAPA:", erroCapa); return res.status(500).json(erroCapa.message); }
+
+    const { error: erroPdf } = await supabase.storage.from("Livros").upload(nomePdf, pdf.buffer, { contentType: pdf.mimetype });
+    if (erroPdf) { console.log("ERRO PDF:", erroPdf); return res.status(500).json(erroPdf.message); }
+
+    const capaUrl = supabase.storage.from("capas").getPublicUrl(nomeCapa).data.publicUrl;
+    const pdfUrl = supabase.storage.from("Livros").getPublicUrl(nomePdf).data.publicUrl;
+
+    const resultado = await pool.query(
+      `INSERT INTO livros (nome, genero, capa_url, pdf_url, valor) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [nome, genero, capaUrl, pdfUrl, valorNumber]
+    );
+
+    return res.status(201).json({ livro: resultado.rows[0], msg: "Livro inserido com sucesso" });
+  } catch (erro) {
+    console.log("ERRO /livros:", erro);
+    return res.status(500).json({ erro: erro.message });
+  }
+});
+
+app.get("/livros", async (req, res) => {
+  try {
+    const resultado = await pool.query(`SELECT * FROM livros ORDER BY id`);
+    res.status(200).json(resultado.rows);
+  } catch (erro) {
+    res.status(500).json({ erro: erro.message });
+  }
+});
+
+app.put("/livros/:id", upload.any(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, genero, valor } = req.body;
+    const capa = req.files?.find(f => f.fieldname === "capa");
+    const pdf = req.files?.find(f => f.fieldname === "pdf");
+    const valorNumber = Number(valor);
+
+    if (!Number.isFinite(valorNumber)) return res.status(422).json("Valor inválido");
+
+    const livroAtual = await pool.query("SELECT * FROM livros WHERE id=$1", [id]);
+    if (livroAtual.rows.length === 0) return res.status(404).json("Livro não encontrado");
+
+    let capaUrl = livroAtual.rows[0].capa_url;
+    let pdfUrl = livroAtual.rows[0].pdf_url;
+
+    const sanitize = (name) =>
+      name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9.-]/g, "-");
+
+    if (capa) {
+      const nomeCapa = `${Date.now()}-${sanitize(capa.originalname)}`;
+      const { error } = await supabase.storage.from("capas").upload(nomeCapa, capa.buffer, { contentType: capa.mimetype });
+      if (error) return res.status(500).json(error.message);
+      capaUrl = supabase.storage.from("capas").getPublicUrl(nomeCapa).data.publicUrl;
+    }
+
+    if (pdf) {
+      const nomePdf = `${Date.now()}-${sanitize(pdf.originalname)}`;
+      const { error } = await supabase.storage.from("Livros").upload(nomePdf, pdf.buffer, { contentType: pdf.mimetype });
+      if (error) return res.status(500).json(error.message);
+      pdfUrl = supabase.storage.from("Livros").getPublicUrl(nomePdf).data.publicUrl;
+    }
+
+    const resultado = await pool.query(
+      `UPDATE livros SET nome=$1, genero=$2, capa_url=$3, pdf_url=$4, valor=$5 WHERE id=$6 RETURNING *`,
+      [nome, genero, capaUrl, pdfUrl, valorNumber, id]
+    );
+
+    return res.json(resultado.rows[0]);
+  } catch (erro) {
+    console.log(erro);
+    return res.status(500).json({ erro: erro.message });
+  }
+});
+
+app.delete("/livros/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const resultado = await pool.query(`DELETE FROM livros WHERE id=$1 RETURNING *`, [id]);
+    if (resultado.rows.length === 0) return res.status(404).json("Livro não encontrado");
+    res.json(resultado.rows[0]);
+  } catch (erro) {
+    res.status(500).json({ erro: erro.message });
+  }
+});
+
+app.delete("/alugueis/:id", checar_token, async (req, res) => {
+  try {
+    const usuario_id = Number(req.usuario.id);
+    const aluguel_id = Number(req.params.id);
+
+    const aluguelRes = await pool.query(
+      `SELECT *,
+              EXTRACT(EPOCH FROM (NOW() - criado_em)) / 60 AS minutos_decorridos
+       FROM Alugar
+       WHERE id = $1 AND usuario_id = $2`,
+      [aluguel_id, usuario_id]
+    );
+
+    if (aluguelRes.rows.length === 0) {
+      return res.status(404).json("Aluguel não encontrado");
+    }
+
+    const aluguel = aluguelRes.rows[0];
+    const diferencaMinutos = Number(aluguel.minutos_decorridos);
+
+    console.log("MINUTOS DECORRIDOS (pg):", diferencaMinutos);
+
+    if (diferencaMinutos > 5) {
+      return res.status(403).json(
+        `Prazo encerrado. Já passaram ${diferencaMinutos.toFixed(2)} minutos.`
+      );
+    }
+
+    await pool.query(`DELETE FROM Alugar WHERE id = $1`, [aluguel_id]);
+
+    await pool.query(
+      `UPDATE Usuarios SET credito = credito + $1 WHERE id = $2`,
+      [Number(aluguel.valor_total), usuario_id]
+    );
+
+    const usuarioRes = await pool.query(
+      `SELECT credito FROM Usuarios WHERE id = $1`,
+      [usuario_id]
+    );
+
+    res.json({
+      msg: "Reembolso realizado com sucesso",
+      novo_credito: Number(usuarioRes.rows[0].credito),
+    });
+
+  } catch (erro) {
+    console.log(erro.message);
+    res.status(500).json("Erro no servidor");
+  }
+});
+
+
+
+app.listen(porta, () => {
+  console.log(`rodando na porta ${porta}`);
+>>>>>>> 3fc06ae (Commit da atualizaçao de dados e Saldo de credito)
 });
