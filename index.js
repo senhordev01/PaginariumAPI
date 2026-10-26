@@ -195,6 +195,15 @@ function verificarAcesso(req, id) {
     return Number(req.usuario.id) === Number(id);
 }
 
+// Dono da conta de usuário comum. Administradores têm ids de outra
+// tabela, então o tipo precisa ser conferido para não haver colisão.
+function ehDonoDaConta(req, id) {
+    return req.usuario?.tipo === "normal" && verificarAcesso(req, id);
+}
+
+const CREDITO_MAXIMO_POR_RECARGA = 1000;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 app.get("/usuarios/:id", checar_token, async (req, res) => {
     try {
 
@@ -216,7 +225,8 @@ app.get("/usuarios/:id", checar_token, async (req, res) => {
             return res.status(404).json("Usuário não encontrado");
         }
 
-        const usuario = resultado.rows[0];
+        // Nunca devolve o hash da senha para o cliente.
+        const { senha, ...usuario } = resultado.rows[0];
 
         res.json(usuario);
 
@@ -226,31 +236,121 @@ app.get("/usuarios/:id", checar_token, async (req, res) => {
     }
 });
 
+// Atualização parcial: envie só "nome", só "email" ou os dois.
 app.put("/usuarios/:id", checar_token, async (req, res) => {
     try {
         const paramID = Number(req.params.id);
-        const id = Number(req.usuario.id);
 
-        if (id !== paramID) {
+        if (!ehDonoDaConta(req, paramID)) {
             return res.status(403).json("Acesso negado");
         }
 
-        const {nome, email} = req.body;
+        let { nome, email } = req.body || {};
 
+        if (nome === undefined && email === undefined) {
+            return res.status(422).json("Envie o nome e/ou o e-mail para atualizar");
+        }
+
+        if (nome !== undefined) {
+            nome = String(nome).trim().replace(/\s+/g, " ");
+            if (nome.length < 2 || nome.length > 100) {
+                return res.status(422).json("O nome deve ter entre 2 e 100 caracteres");
+            }
+        }
+
+        if (email !== undefined) {
+            email = String(email).trim().toLowerCase();
+            if (!EMAIL_REGEX.test(email) || email.length > 150) {
+                return res.status(422).json("E-mail inválido");
+            }
+
+            const emailEmUso = await pool.query(
+                "SELECT 1 FROM Usuarios WHERE email=$1 AND id<>$2",
+                [email, paramID]
+            );
+
+            if (emailEmUso.rows.length > 0) {
+                return res.status(409).json("Esse e-mail já está em uso");
+            }
+        }
+
+        // COALESCE mantém o valor atual quando o campo não foi enviado.
         const resultado = await pool.query(
-            `UPDATE Usuarios SET nome=$1, email=$2 WHERE id=$3 RETURNING id`,
-            [nome, email, paramID]
-
+            `UPDATE Usuarios
+                SET nome  = COALESCE($1, nome),
+                    email = COALESCE($2, email)
+              WHERE id = $3
+          RETURNING id, nome, email, credito`,
+            [nome ?? null, email ?? null, paramID]
         );
 
         if (resultado.rowCount === 0) {
             return res.status(404).json("Usuário não encontrado");
         }
 
-        res.status(200).json("Usuário Atualizado!");
+        const atualizado = resultado.rows[0];
+
+        res.status(200).json({
+            msg: "Usuário Atualizado!",
+            id: atualizado.id,
+            nome: atualizado.nome,
+            email: atualizado.email,
+            credito: Number(atualizado.credito),
+        });
 
     } catch (erro) {
         console.log(erro.message);
+        res.status(500).json("Erro no servidor");
+    }
+});
+
+// Adicionar créditos ao saldo do próprio usuário.
+// body: { valor }  ->  { msg, novo_credito }
+app.post("/usuarios/:id/creditos", checar_token, async (req, res) => {
+    try {
+        const paramID = Number(req.params.id);
+
+        if (!ehDonoDaConta(req, paramID)) {
+            return res.status(403).json("Acesso negado");
+        }
+
+        const bruto = req.body?.valor;
+
+        if (
+            (typeof bruto !== "number" && typeof bruto !== "string") ||
+            String(bruto).trim() === ""
+        ) {
+            return res.status(422).json("Valor inválido");
+        }
+
+        const valor = Math.round(Number(bruto) * 100) / 100;
+
+        if (!Number.isFinite(valor) || valor <= 0 || valor > CREDITO_MAXIMO_POR_RECARGA) {
+            return res
+                .status(422)
+                .json(`Informe um valor entre 0,01 e ${CREDITO_MAXIMO_POR_RECARGA}`);
+        }
+
+        // Soma feita no banco, de forma atômica.
+        const resultado = await pool.query(
+            `UPDATE Usuarios
+                SET credito = credito + $1
+              WHERE id = $2
+          RETURNING credito`,
+            [valor, paramID]
+        );
+
+        if (resultado.rowCount === 0) {
+            return res.status(404).json("Usuário não encontrado");
+        }
+
+        res.status(200).json({
+            msg: "Créditos adicionados com sucesso",
+            novo_credito: Number(resultado.rows[0].credito),
+        });
+
+    } catch (erro) {
+        console.log("ERRO CRÉDITOS:", erro.message);
         res.status(500).json("Erro no servidor");
     }
 });
