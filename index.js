@@ -1,4 +1,3 @@
-
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcrypt");
@@ -587,8 +586,20 @@ app.get("/alugueis", checar_token, async (req, res) => {
 // ======================================================
 
 app.post("/alugueis", checar_token, async (req, res) => {
-  const livroId = Number(req.body.livroId);
-  const quantidadeMeses = Number(req.body.quantidadeMeses);
+  const corpo = req.body || {};
+
+  // Aceita vários nomes de campo vindos do front-end.
+  const livroBruto =
+    corpo.livroId ?? corpo.livro_id ?? corpo.idLivro ?? corpo.id;
+
+  const mesesBruto =
+    corpo.quantidadeMeses ??
+    corpo.quantidade_meses ??
+    corpo.meses ??
+    corpo.periodo;
+
+  const livroId = Number(livroBruto);
+  const quantidadeMeses = Number(mesesBruto);
   const usuarioId = Number(req.usuario.id);
 
   if (
@@ -598,8 +609,19 @@ app.post("/alugueis", checar_token, async (req, res) => {
     quantidadeMeses < 1 ||
     quantidadeMeses > 12
   ) {
+    // Log para você ver no Render o que realmente chegou.
+    console.warn("[Criar aluguel] Dados inválidos:", corpo);
+
     return res.status(400).json({
-      erro: "Informe um livro válido e um período de 1 a 12 meses."
+      erro: "Informe um livro válido e um período de 1 a 12 meses.",
+      recebido: {
+        livro: livroBruto ?? null,
+        meses: mesesBruto ?? null
+      },
+      esperado: {
+        livroId: "número inteiro maior que 0",
+        quantidadeMeses: "número inteiro de 1 a 12"
+      }
     });
   }
 
