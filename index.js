@@ -11,7 +11,12 @@ const CHAVE_TOKEN = process.env.CHAVE_TOKEN;
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "Pragma"]
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "Cache-Control",
+    "Pragma"
+  ]
 }));
 
 app.use(express.json({ limit: "1mb" }));
@@ -730,10 +735,11 @@ app.get("/alugueis", checar_token, async (req, res) => {
 // ======================================================
 
 app.post("/alugueis", checar_token, async (req, res) => {
-  const cliente = await pool.connect();
-  let transacaoIniciada = false;
+  let cliente;
 
   try {
+    cliente = await pool.connect();
+
     const usuarioId = Number(req.usuario.id);
     const { livro_id, meses } = req.body || {};
 
@@ -755,112 +761,118 @@ app.post("/alugueis", checar_token, async (req, res) => {
     }
 
     await cliente.query("BEGIN");
-    transacaoIniciada = true;
 
-    const usuarioResult = await cliente.query(
-      `SELECT id, credito
-       FROM usuarios
-       WHERE id = $1
-       FOR UPDATE`,
-      [usuarioId]
-    );
+    let transacaoIniciada = true;
 
-    if (!usuarioResult.rows.length) {
-      await cliente.query("ROLLBACK");
-      transacaoIniciada = false;
+    try {
+      const usuarioResult = await cliente.query(
+        `SELECT id, credito
+         FROM usuarios
+         WHERE id = $1
+         FOR UPDATE`,
+        [usuarioId]
+      );
 
-      return res.status(404).json({
-        erro: "Usuário não encontrado."
-      });
-    }
-
-    const livroResult = await cliente.query(
-      "SELECT id, nome, valor FROM livros WHERE id = $1",
-      [livroId]
-    );
-
-    if (!livroResult.rows.length) {
-      await cliente.query("ROLLBACK");
-      transacaoIniciada = false;
-
-      return res.status(404).json({
-        erro: "Livro não encontrado."
-      });
-    }
-
-    const valorMensal = Number(livroResult.rows[0].valor);
-    const creditoAtual = Number(usuarioResult.rows[0].credito);
-
-    if (
-      !Number.isFinite(valorMensal) ||
-      valorMensal < 0 ||
-      !Number.isSafeInteger(creditoAtual) ||
-      creditoAtual < 0
-    ) {
-      await cliente.query("ROLLBACK");
-      transacaoIniciada = false;
-
-      return res.status(400).json({
-        erro: "O valor do livro ou o saldo de créditos é inválido."
-      });
-    }
-
-    const valorTotal = Number(
-      (valorMensal * quantidadeMeses).toFixed(2)
-    );
-
-    // Regra provisória: 1 crédito equivale a 1 unidade monetária.
-    const creditosNecessarios = Math.ceil(valorTotal);
-
-    if (creditoAtual < creditosNecessarios) {
-      await cliente.query("ROLLBACK");
-      transacaoIniciada = false;
-
-      return res.status(400).json({
-        erro: "Créditos insuficientes para realizar o aluguel.",
-        credito: creditoAtual,
-        creditosNecessarios
-      });
-    }
-
-    const aluguelResult = await cliente.query(
-      `INSERT INTO alugar
-         (usuario_id, livro_id, meses, valor_total, data_inicio, data_fim)
-       VALUES
-         ($1, $2, $3, $4, CURRENT_DATE,
-         (CURRENT_DATE + ($3 * INTERVAL '1 month'))::date)
-       RETURNING
-         id, usuario_id, livro_id, meses, valor_total,
-         data_inicio, data_fim, criado_em`,
-      [usuarioId, livroId, quantidadeMeses, valorTotal]
-    );
-
-    const novoSaldo = creditoAtual - creditosNecessarios;
-
-    await cliente.query(
-      "UPDATE usuarios SET credito = $1 WHERE id = $2",
-      [novoSaldo, usuarioId]
-    );
-
-    await cliente.query("COMMIT");
-    transacaoIniciada = false;
-
-    res.status(201).json({
-      mensagem: "Aluguel criado com sucesso.",
-      aluguel: aluguelResult.rows[0],
-      livro: livroResult.rows[0].nome,
-      credito: novoSaldo,
-      creditosUtilizados: creditosNecessarios
-    });
-  } catch (erro) {
-    if (transacaoIniciada) {
-      try {
+      if (!usuarioResult.rows.length) {
         await cliente.query("ROLLBACK");
-      } catch (erroRollback) {
-        registrarErro("Rollback do aluguel", erroRollback);
-      }
-    }
+        transacaoIniciada = false;
 
+        return res.status(404).json({
+          erro: "Usuário não encontrado."
+        });
+      }
+
+      const livroResult = await cliente.query(
+        "SELECT id, nome, valor FROM livros WHERE id = $1",
+        [livroId]
+      );
+
+      if (!livroResult.rows.length) {
+        await cliente.query("ROLLBACK");
+        transacaoIniciada = false;
+
+        return res.status(404).json({
+          erro: "Livro não encontrado."
+        });
+      }
+
+      const valorMensal = Number(livroResult.rows[0].valor);
+      const creditoAtual = Number(usuarioResult.rows[0].credito);
+
+      if (
+        !Number.isFinite(valorMensal) ||
+        valorMensal < 0 ||
+        !Number.isSafeInteger(creditoAtual) ||
+        creditoAtual < 0
+      ) {
+        await cliente.query("ROLLBACK");
+        transacaoIniciada = false;
+
+        return res.status(400).json({
+          erro: "O valor do livro ou o saldo de créditos é inválido."
+        });
+      }
+
+      const valorTotal = Number(
+        (valorMensal * quantidadeMeses).toFixed(2)
+      );
+
+      // Regra provisória: 1 crédito equivale a 1 unidade monetária.
+      const creditosNecessarios = Math.ceil(valorTotal);
+
+      if (creditoAtual < creditosNecessarios) {
+        await cliente.query("ROLLBACK");
+        transacaoIniciada = false;
+
+        return res.status(400).json({
+          erro: "Créditos insuficientes para realizar o aluguel.",
+          credito: creditoAtual,
+          creditosNecessarios
+        });
+      }
+
+      // Correção: o parâmetro de meses é explicitamente INTEGER.
+      const aluguelResult = await cliente.query(
+        `INSERT INTO alugar
+           (usuario_id, livro_id, meses, valor_total, data_inicio, data_fim)
+         VALUES
+           ($1, $2, $3::integer, $4, CURRENT_DATE,
+            (CURRENT_DATE + ($3::integer * INTERVAL '1 month'))::date)
+         RETURNING
+           id, usuario_id, livro_id, meses, valor_total,
+           data_inicio, data_fim, criado_em`,
+        [usuarioId, livroId, quantidadeMeses, valorTotal]
+      );
+
+      const novoSaldo = creditoAtual - creditosNecessarios;
+
+      await cliente.query(
+        "UPDATE usuarios SET credito = $1 WHERE id = $2",
+        [novoSaldo, usuarioId]
+      );
+
+      await cliente.query("COMMIT");
+      transacaoIniciada = false;
+
+      return res.status(201).json({
+        mensagem: "Aluguel criado com sucesso.",
+        aluguel: aluguelResult.rows[0],
+        livro: livroResult.rows[0].nome,
+        credito: novoSaldo,
+        creditosUtilizados: creditosNecessarios
+      });
+    } catch (erro) {
+      if (transacaoIniciada) {
+        try {
+          await cliente.query("ROLLBACK");
+        } catch (erroRollback) {
+          registrarErro("Rollback do aluguel", erroRollback);
+        }
+      }
+
+      throw erro;
+    }
+  } catch (erro) {
     registrarErro("Criar aluguel", erro);
 
     if (erro.code === "23503") {
@@ -882,12 +894,14 @@ app.post("/alugueis", checar_token, async (req, res) => {
       });
     }
 
-    res.status(500).json({
+    return res.status(500).json({
       erro: "Não foi possível criar o aluguel.",
       codigo: erro.code || "ERRO_INTERNO"
     });
   } finally {
-    cliente.release();
+    if (cliente) {
+      cliente.release();
+    }
   }
 });
 
@@ -923,7 +937,7 @@ app.use((erro, req, res, next) => {
 
   registrarErro("Erro não tratado", erro);
 
-  res.status(500).json({
+  return res.status(500).json({
     erro: "Ocorreu um erro interno no servidor."
   });
 });
