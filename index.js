@@ -10,21 +10,39 @@ dotenv.config();
 
 const app = express();
 const porta = process.env.PORT || 8080;
+const CHAVE_TOKEN = process.env.CHAVE_TOKEN;
 
-app.use(express.json());
+// ==========================================
+// CONFIGURAÇÃO DO SERVIDOR
+// ==========================================
 
 app.use(
   cors({
     origin: "*",
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    methods: [
+      "GET",
+      "POST",
+      "PUT",
+      "PATCH",
+      "DELETE",
+      "OPTIONS",
+    ],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "Cache-Control",
+      "Pragma",
+    ],
+    optionsSuccessStatus: 204,
   })
 );
 
-const CHAVE_TOKEN = process.env.CHAVE_TOKEN;
+app.use(express.json());
 
 if (!CHAVE_TOKEN) {
-  console.error("ERRO: CHAVE_TOKEN não foi definida no ambiente.");
+  console.error(
+    "ERRO: CHAVE_TOKEN não foi definida no ambiente."
+  );
 }
 
 // ==========================================
@@ -34,7 +52,10 @@ if (!CHAVE_TOKEN) {
 function checar_token(req, res, next) {
   const authorization = req.headers.authorization;
 
-  if (!authorization || !authorization.startsWith("Bearer ")) {
+  if (
+    !authorization ||
+    !authorization.startsWith("Bearer ")
+  ) {
     return res.status(401).json({
       erro: "Token de autenticação não informado.",
     });
@@ -53,7 +74,7 @@ function checar_token(req, res, next) {
 
     req.usuario = decoded;
 
-    next();
+    return next();
   } catch (erro) {
     return res.status(401).json({
       erro: "Token inválido ou expirado.",
@@ -74,7 +95,7 @@ function verificarAcesso(req, id) {
 // ==========================================
 
 app.get("/", (req, res) => {
-  res.status(200).json({
+  return res.status(200).json({
     mensagem: "API do Paginarium funcionando!",
   });
 });
@@ -93,16 +114,30 @@ app.post("/cadastro", async (req, res) => {
       });
     }
 
+    const nomeNormalizado = String(nome).trim();
     const emailNormalizado = String(email).trim().toLowerCase();
+    const senhaTexto = String(senha);
 
-    if (String(senha).length < 6) {
+    if (
+      !nomeNormalizado ||
+      !emailNormalizado ||
+      !emailNormalizado.includes("@")
+    ) {
+      return res.status(400).json({
+        erro: "Informe um nome e um e-mail válidos.",
+      });
+    }
+
+    if (senhaTexto.length < 6) {
       return res.status(400).json({
         erro: "A senha deve ter pelo menos 6 caracteres.",
       });
     }
 
     const existente = await pool.query(
-      "SELECT id FROM usuarios WHERE LOWER(email) = $1",
+      `SELECT id
+       FROM usuarios
+       WHERE LOWER(email) = $1`,
       [emailNormalizado]
     );
 
@@ -112,13 +147,13 @@ app.post("/cadastro", async (req, res) => {
       });
     }
 
-    const senhaHash = await bcrypt.hash(String(senha), 10);
+    const senhaHash = await bcrypt.hash(senhaTexto, 10);
 
     const resultado = await pool.query(
       `INSERT INTO usuarios (nome, email, senha)
        VALUES ($1, $2, $3)
        RETURNING id, nome, email`,
-      [String(nome).trim(), emailNormalizado, senhaHash]
+      [nomeNormalizado, emailNormalizado, senhaHash]
     );
 
     return res.status(201).json({
@@ -154,11 +189,13 @@ app.post("/login", async (req, res) => {
       });
     }
 
+    const emailNormalizado = String(email).trim().toLowerCase();
+
     const resultado = await pool.query(
       `SELECT id, nome, email, senha
        FROM usuarios
        WHERE LOWER(email) = $1`,
-      [String(email).trim().toLowerCase()]
+      [emailNormalizado]
     );
 
     if (resultado.rows.length === 0) {
@@ -192,7 +229,9 @@ app.post("/login", async (req, res) => {
         email: usuario.email,
       },
       CHAVE_TOKEN,
-      { expiresIn: "2h" }
+      {
+        expiresIn: "2h",
+      }
     );
 
     return res.status(200).json({
@@ -227,7 +266,6 @@ app.get("/usuarios/:id", checar_token, async (req, res) => {
       });
     }
 
-    // Mantém apenas colunas confirmadas pelo código original.
     const resultado = await pool.query(
       `SELECT id, nome, email
        FROM usuarios
@@ -272,14 +310,21 @@ app.put("/usuarios/:id", checar_token, async (req, res) => {
       });
     }
 
+    const nomeNormalizado = String(nome).trim();
     const emailNormalizado = String(email).trim().toLowerCase();
+
+    if (!nomeNormalizado || !emailNormalizado.includes("@")) {
+      return res.status(400).json({
+        erro: "Informe um nome e um e-mail válidos.",
+      });
+    }
 
     const resultado = await pool.query(
       `UPDATE usuarios
        SET nome = $1, email = $2
        WHERE id = $3
        RETURNING id, nome, email`,
-      [String(nome).trim(), emailNormalizado, id]
+      [nomeNormalizado, emailNormalizado, id]
     );
 
     if (resultado.rows.length === 0) {
@@ -340,6 +385,13 @@ app.delete("/usuarios/:id", checar_token, async (req, res) => {
   } catch (erro) {
     console.error("Erro ao excluir usuário:", erro);
 
+    if (erro.code === "23503") {
+      return res.status(409).json({
+        erro:
+          "Este usuário possui registros associados e não pode ser excluído.",
+      });
+    }
+
     return res.status(500).json({
       erro: "Não foi possível excluir o usuário.",
     });
@@ -350,12 +402,10 @@ app.delete("/usuarios/:id", checar_token, async (req, res) => {
 // CADASTRO DE ADMINISTRADOR
 // ==========================================
 
-// ATENÇÃO: esta rota é pública no código original.
-// Não a mantenha pública em produção.
-// O cadastro administrativo deve ser restrito a um
-// processo autorizado e protegido.
+// Cadastro público de administradores desativado.
+// Configure um processo administrativo autorizado.
 
-app.post("/admin/login", async (req, res) => {
+app.post("/admin/login", (req, res) => {
   return res.status(403).json({
     erro:
       "Cadastro público de administrador desativado. " +
@@ -394,7 +444,9 @@ app.get("/livros/:id", async (req, res) => {
     const { id } = req.params;
 
     const resultado = await pool.query(
-      "SELECT * FROM livros WHERE id = $1",
+      `SELECT *
+       FROM livros
+       WHERE id = $1`,
       [id]
     );
 
@@ -517,11 +569,15 @@ app.delete("/livros/:id", async (req, res) => {
   } catch (erro) {
     console.error("Erro ao excluir livro:", erro);
 
+    if (erro.code === "23503") {
+      return res.status(409).json({
+        erro:
+          "Este livro possui registros associados e não pode ser excluído.",
+      });
+    }
+
     return res.status(500).json({
-      erro:
-        erro.code === "23503"
-          ? "Este livro possui registros associados e não pode ser excluído."
-          : "Não foi possível excluir o livro.",
+      erro: "Não foi possível excluir o livro.",
     });
   }
 });
@@ -548,8 +604,7 @@ app.get("/alugueis", checar_token, async (req, res) => {
 
     if (erro.code === "42P01") {
       return res.status(500).json({
-        erro:
-          "A tabela alugueis não existe no banco de dados.",
+        erro: "A tabela alugueis não existe no banco de dados.",
       });
     }
 
@@ -586,12 +641,15 @@ app.post("/alugueis", checar_token, async (req, res) => {
       quantidadeMeses <= 0
     ) {
       return res.status(400).json({
-        erro: "Informe um livro e uma quantidade de meses válidos.",
+        erro:
+          "Informe um livro e uma quantidade de meses válidos.",
       });
     }
 
     const livro = await pool.query(
-      "SELECT id FROM livros WHERE id = $1",
+      `SELECT id
+       FROM livros
+       WHERE id = $1`,
       [livroId]
     );
 
@@ -621,6 +679,13 @@ app.post("/alugueis", checar_token, async (req, res) => {
         erro:
           "A estrutura da tabela alugueis não corresponde " +
           "à consulta da API.",
+      });
+    }
+
+    if (erro.code === "23503") {
+      return res.status(400).json({
+        erro:
+          "O usuário ou o livro informado não existe no banco de dados.",
       });
     }
 
@@ -662,5 +727,7 @@ app.use((erro, req, res, next) => {
 // ==========================================
 
 app.listen(porta, () => {
-  console.log(`PaginariumAPI executando na porta ${porta}`);
+  console.log(
+    `PaginariumAPI executando na porta ${porta}`
+  );
 });
