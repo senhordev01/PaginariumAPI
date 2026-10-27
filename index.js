@@ -8,7 +8,7 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 
 const app = express();
-const porta = process.env.PORT || 8080;
+const porta = 8080;
 
 app.use(express.json());
 app.use(cors());
@@ -88,7 +88,7 @@ app.post("/cadastro", async (req, res) => {
   }
 });
 
-/*Area de Login no Sistema*/
+/* Area de Login no Sistema */
 
 app.post("/login", async (req, res) => {
     try {
@@ -134,8 +134,6 @@ app.post("/login", async (req, res) => {
 function verificarAcesso(req, id) {
     return Number(req.usuario.id) === Number(id);
 }
-
-/* CONSULTAR USUÁRIO */
 
 app.get("/usuarios/:id", checar_token, async (req, res) => {
     try {
@@ -224,10 +222,10 @@ app.delete("/usuarios/:id", checar_token, async (req, res) => {
     }
 });
 
-/* Area de Criar Contas Adm*/
+/* Area de Criar Contas Adm */
 
 app.post("/admin/login", async (req, res) => {
-  try{
+  try {
     const { nome, email, senha } = req.body;
 
     const admExiste = await pool.query(
@@ -259,13 +257,13 @@ app.post("/admin/login", async (req, res) => {
       msg: "Administrador cadastrado com sucesso"
     });
 
-  }catch(erro){
+  } catch(erro) {
     console.log(erro.message);
     res.status(500).json("erro no servidor");
   }
 });
 
-/*Area do Crud dos Livros*/
+/* Area do CRUD dos Livros */
 
 // POST
 app.post("/livros", async (req, res) => {
@@ -376,26 +374,16 @@ app.delete("/livros/:id", async (req, res) => {
   }
 });
 
-/* AREA DE ALUGUÉIS */
+/* Area de Alugueis */
 
-// A rota foi adicionada para evitar que GET /alugueis
-// fique sem tratamento. A consulta real depende do esquema
-// da tabela de aluguéis no PostgreSQL.
-
-app.get("/alugueis", (req, res) => {
-    return res.status(501).json({
-        erro: "A consulta de aluguéis ainda precisa ser implementada."
-    });
+// GET
+app.get("/alugueis", async (req, res) => {
+  return res.status(501).json({
+    erro: "Rota encontrada, mas a consulta de aluguéis ainda não foi implementada."
+  });
 });
 
-/* ROTA NÃO ENCONTRADA */
-
-app.use((req, res) => {
-    res.status(404).json({
-        erro: "Rota não encontrada",
-        caminho: req.originalUrl
-    });
-});
+/* Inicialização do servidor */
 
 app.listen(porta, () => {
   console.log(`rodando na porta ${porta}`);
