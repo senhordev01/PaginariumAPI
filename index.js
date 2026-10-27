@@ -1,633 +1,666 @@
 
 import express from "express";
-import "dotenv/config";
+import dotenv from "dotenv";
 import cors from "cors";
-import pool from "./db.js";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import pool from "./db.js";
+
+dotenv.config();
 
 const app = express();
 const porta = process.env.PORT || 8080;
 
 app.use(express.json());
-app.use(cors());
 
-// =====================================================
-// AUTENTICAÇÃO JWT
-// =====================================================
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+const CHAVE_TOKEN = process.env.CHAVE_TOKEN;
+
+if (!CHAVE_TOKEN) {
+  console.error("ERRO: CHAVE_TOKEN não foi definida no ambiente.");
+}
+
+// ==========================================
+// MIDDLEWARE DE AUTENTICAÇÃO
+// ==========================================
 
 function checar_token(req, res, next) {
-    try {
-        const authHeader = req.headers.authorization;
+  const authorization = req.headers.authorization;
 
-        if (!authHeader) {
-            return res.status(401).json({
-                erro: "Token não enviado"
-            });
-        }
+  if (!authorization || !authorization.startsWith("Bearer ")) {
+    return res.status(401).json({
+      erro: "Token de autenticação não informado.",
+    });
+  }
 
-        const partes = authHeader.split(" ");
+  const token = authorization.split(" ")[1];
 
-        if (partes.length !== 2 || partes[0] !== "Bearer") {
-            return res.status(401).json({
-                erro: "Formato do token inválido"
-            });
-        }
+  if (!token || !CHAVE_TOKEN) {
+    return res.status(401).json({
+      erro: "Token inválido ou autenticação indisponível.",
+    });
+  }
 
-        const token = partes[1];
+  try {
+    const decoded = jwt.verify(token, CHAVE_TOKEN);
 
-        const decoded = jwt.verify(
-            token,
-            process.env.CHAVE_TOKEN
-        );
+    req.usuario = decoded;
 
-        req.usuario = decoded;
-
-        next();
-    } catch (erro) {
-        console.log("JWT ERROR:", erro.message);
-
-        return res.status(401).json({
-            erro: "Token inválido ou expirado"
-        });
-    }
+    next();
+  } catch (erro) {
+    return res.status(401).json({
+      erro: "Token inválido ou expirado.",
+    });
+  }
 }
+
+// ==========================================
+// VERIFICAÇÃO DE ACESSO
+// ==========================================
 
 function verificarAcesso(req, id) {
-    return Number(req.usuario.id) === Number(id);
+  return Number(req.usuario?.id) === Number(id);
 }
 
-// =====================================================
-// CADASTRO DE USUÁRIOS
-// =====================================================
-
-app.post("/cadastro", async (req, res) => {
-    try {
-        const { nome, email, senha } = req.body || {};
-
-        if (!nome || !email || !senha) {
-            return res.status(422).json({
-                erro: "Nome, email e senha são obrigatórios"
-            });
-        }
-
-        const usuarioExiste = await pool.query(
-            `SELECT id FROM usuarios WHERE email = $1`,
-            [email]
-        );
-
-        if (usuarioExiste.rows.length > 0) {
-            return res.status(409).json({
-                erro: "Esse usuário já foi cadastrado"
-            });
-        }
-
-        const senhaHash = await bcrypt.hash(senha, 12);
-
-        const resultado = await pool.query(
-            `INSERT INTO usuarios (nome, email, senha)
-             VALUES ($1, $2, $3)
-             RETURNING id, nome, email`,
-            [nome, email, senhaHash]
-        );
-
-        return res.status(201).json({
-            usuario: resultado.rows[0],
-            msg: "Usuário cadastrado com sucesso"
-        });
-    } catch (erro) {
-        console.error("ERRO NO CADASTRO:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor"
-        });
-    }
-});
-
-// =====================================================
-// LOGIN DE USUÁRIOS
-// =====================================================
-
-app.post("/login", async (req, res) => {
-    try {
-        const { email, senha } = req.body || {};
-
-        if (!email || !senha) {
-            return res.status(422).json({
-                erro: "Email e senha são obrigatórios"
-            });
-        }
-
-        const resultado = await pool.query(
-            `SELECT id, nome, email, senha
-             FROM usuarios
-             WHERE email = $1`,
-            [email]
-        );
-
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({
-                erro: "Usuário não encontrado"
-            });
-        }
-
-        const usuario = resultado.rows[0];
-
-        const senhaValida = await bcrypt.compare(
-            senha,
-            usuario.senha
-        );
-
-        if (!senhaValida) {
-            return res.status(401).json({
-                erro: "Senha inválida"
-            });
-        }
-
-        if (!process.env.CHAVE_TOKEN) {
-            throw new Error("CHAVE_TOKEN não configurada");
-        }
-
-        const token = jwt.sign(
-            {
-                id: usuario.id,
-                email: usuario.email
-            },
-            process.env.CHAVE_TOKEN,
-            {
-                expiresIn: "2h"
-            }
-        );
-
-        return res.status(200).json({
-            mensagem: "Login realizado",
-            token,
-            usuario: {
-                id: usuario.id,
-                nome: usuario.nome,
-                email: usuario.email
-            }
-        });
-    } catch (erro) {
-        console.error("ERRO NO LOGIN:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor"
-        });
-    }
-});
-
-// =====================================================
-// CONSULTAR USUÁRIO
-// =====================================================
-
-app.get("/usuarios/:id", checar_token, async (req, res) => {
-    try {
-        const { id } = req.params;
-
-        if (!verificarAcesso(req, id)) {
-            return res.status(403).json({
-                erro: "Acesso negado"
-            });
-        }
-
-        const resultado = await pool.query(
-            `SELECT id, nome, email
-             FROM usuarios
-             WHERE id = $1`,
-            [id]
-        );
-
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({
-                erro: "Usuário não encontrado"
-            });
-        }
-
-        return res.status(200).json(resultado.rows[0]);
-    } catch (erro) {
-        console.error("ERRO AO CONSULTAR USUÁRIO:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor"
-        });
-    }
-});
-
-// =====================================================
-// ATUALIZAR USUÁRIO
-// =====================================================
-
-app.put("/usuarios/:id", checar_token, async (req, res) => {
-    try {
-        const paramID = Number(req.params.id);
-
-        if (!Number.isInteger(paramID) || paramID <= 0) {
-            return res.status(400).json({
-                erro: "ID inválido"
-            });
-        }
-
-        if (!verificarAcesso(req, paramID)) {
-            return res.status(403).json({
-                erro: "Acesso negado"
-            });
-        }
-
-        const { nome, email } = req.body || {};
-
-        if (!nome || !email) {
-            return res.status(422).json({
-                erro: "Nome e email são obrigatórios"
-            });
-        }
-
-        const resultado = await pool.query(
-            `UPDATE usuarios
-             SET nome = $1, email = $2
-             WHERE id = $3
-             RETURNING id, nome, email`,
-            [nome, email, paramID]
-        );
-
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({
-                erro: "Usuário não encontrado"
-            });
-        }
-
-        return res.status(200).json({
-            mensagem: "Usuário atualizado com sucesso",
-            usuario: resultado.rows[0]
-        });
-    } catch (erro) {
-        console.error("ERRO AO ATUALIZAR USUÁRIO:", erro.message);
-
-        if (erro.code === "23505") {
-            return res.status(409).json({
-                erro: "Esse email já está cadastrado"
-            });
-        }
-
-        return res.status(500).json({
-            erro: "Erro no servidor"
-        });
-    }
-});
-
-// =====================================================
-// EXCLUIR USUÁRIO
-// =====================================================
-
-app.delete("/usuarios/:id", checar_token, async (req, res) => {
-    try {
-        const paramID = Number(req.params.id);
-
-        if (!Number.isInteger(paramID) || paramID <= 0) {
-            return res.status(400).json({
-                erro: "ID inválido"
-            });
-        }
-
-        if (!verificarAcesso(req, paramID)) {
-            return res.status(403).json({
-                erro: "Acesso negado"
-            });
-        }
-
-        const resultado = await pool.query(
-            `DELETE FROM usuarios
-             WHERE id = $1
-             RETURNING id`,
-            [paramID]
-        );
-
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({
-                erro: "Usuário não encontrado"
-            });
-        }
-
-        return res.status(200).json({
-            mensagem: "Usuário excluído com sucesso"
-        });
-    } catch (erro) {
-        console.error("ERRO AO EXCLUIR USUÁRIO:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor"
-        });
-    }
-});
-
-// =====================================================
-// CADASTRO DE ADMINISTRADOR
-// =====================================================
-
-// ATENÇÃO: esta rota permite criar administradores publicamente.
-// Em produção, restrinja o cadastro a administradores autorizados.
-
-app.post("/admin/login", async (req, res) => {
-    try {
-        const { nome, email, senha } = req.body || {};
-
-        if (!nome || !email || !senha) {
-            return res.status(422).json({
-                erro: "Nome, email e senha são obrigatórios"
-            });
-        }
-
-        const admExiste = await pool.query(
-            `SELECT id FROM administradores WHERE email = $1`,
-            [email]
-        );
-
-        if (admExiste.rows.length > 0) {
-            return res.status(409).json({
-                erro: "Esse administrador já foi cadastrado"
-            });
-        }
-
-        const senhaHash = await bcrypt.hash(senha, 12);
-
-        const resultado = await pool.query(
-            `INSERT INTO administradores (nome, email, senha)
-             VALUES ($1, $2, $3)
-             RETURNING id, nome, email`,
-            [nome, email, senhaHash]
-        );
-
-        return res.status(201).json({
-            administrador: resultado.rows[0],
-            msg: "Administrador cadastrado com sucesso"
-        });
-    } catch (erro) {
-        console.error("ERRO NO CADASTRO DE ADMIN:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor"
-        });
-    }
-});
-
-// =====================================================
-// CRUD DE LIVROS
-// =====================================================
-
-// CADASTRAR LIVRO
-
-app.post("/livros", async (req, res) => {
-    try {
-        const { nome, genero } = req.body || {};
-
-        if (!nome || !genero) {
-            return res.status(422).json({
-                erro: "Nome e gênero são obrigatórios"
-            });
-        }
-
-        const livroExiste = await pool.query(
-            `SELECT id FROM livros WHERE nome = $1`,
-            [nome]
-        );
-
-        if (livroExiste.rows.length > 0) {
-            return res.status(409).json({
-                erro: "Esse livro já foi cadastrado"
-            });
-        }
-
-        const resultado = await pool.query(
-            `INSERT INTO livros (nome, genero)
-             VALUES ($1, $2)
-             RETURNING *`,
-            [nome, genero]
-        );
-
-        return res.status(201).json({
-            livro: resultado.rows[0],
-            msg: "Livro inserido com sucesso"
-        });
-    } catch (erro) {
-        console.error("ERRO AO CADASTRAR LIVRO:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor"
-        });
-    }
-});
-
-// LISTAR LIVROS
-
-app.get("/livros", async (req, res) => {
-    try {
-        const resultado = await pool.query(
-            `SELECT * FROM livros ORDER BY id`
-        );
-
-        return res.status(200).json(resultado.rows);
-    } catch (erro) {
-        console.error("ERRO AO LISTAR LIVROS:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor"
-        });
-    }
-});
-
-// ATUALIZAR LIVRO
-
-app.put("/livros/:id", async (req, res) => {
-    try {
-        const { nome, genero } = req.body || {};
-        const id = Number(req.params.id);
-
-        if (!Number.isInteger(id) || id <= 0) {
-            return res.status(400).json({
-                erro: "ID inválido"
-            });
-        }
-
-        if (!nome || !genero) {
-            return res.status(422).json({
-                erro: "Nome e gênero são obrigatórios"
-            });
-        }
-
-        const resultado = await pool.query(
-            `UPDATE livros
-             SET nome = $1, genero = $2
-             WHERE id = $3
-             RETURNING *`,
-            [nome, genero, id]
-        );
-
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({
-                erro: "Livro não encontrado"
-            });
-        }
-
-        return res.status(200).json(resultado.rows[0]);
-    } catch (erro) {
-        console.error("ERRO AO ATUALIZAR LIVRO:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor"
-        });
-    }
-});
-
-// EXCLUIR LIVRO
-
-app.delete("/livros/:id", async (req, res) => {
-    try {
-        const id = Number(req.params.id);
-
-        if (!Number.isInteger(id) || id <= 0) {
-            return res.status(400).json({
-                erro: "ID inválido"
-            });
-        }
-
-        const resultado = await pool.query(
-            `DELETE FROM livros
-             WHERE id = $1
-             RETURNING *`,
-            [id]
-        );
-
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({
-                erro: "Livro não encontrado"
-            });
-        }
-
-        return res.status(200).json({
-            mensagem: "Livro excluído com sucesso",
-            livro: resultado.rows[0]
-        });
-    } catch (erro) {
-        console.error("ERRO AO EXCLUIR LIVRO:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor"
-        });
-    }
-});
-
-// =====================================================
-// ALUGUÉIS
-// =====================================================
-
-// ATENÇÃO:
-// Estas rotas pressupõem uma tabela "alugueis" com as colunas:
-// id, usuario_id, livro_id, meses e data_inicio.
-// Ajuste os nomes caso seu banco utilize outra estrutura.
-
-// LISTAR ALUGUÉIS DO USUÁRIO AUTENTICADO
-
-app.get("/alugueis", checar_token, async (req, res) => {
-    try {
-        const usuarioID = Number(req.usuario.id);
-
-        const resultado = await pool.query(
-            `SELECT *
-             FROM alugueis
-             WHERE usuario_id = $1
-             ORDER BY id DESC`,
-            [usuarioID]
-        );
-
-        return res.status(200).json(resultado.rows);
-    } catch (erro) {
-        console.error("ERRO AO LISTAR ALUGUÉIS:", erro.message);
-
-        if (erro.code === "42P01") {
-            return res.status(500).json({
-                erro: "A tabela alugueis não existe no banco de dados"
-            });
-        }
-
-        return res.status(500).json({
-            erro: "Erro ao consultar aluguéis"
-        });
-    }
-});
-
-// CADASTRAR ALUGUEL
-
-app.post("/alugueis", checar_token, async (req, res) => {
-    try {
-        const usuarioID = Number(req.usuario.id);
-        const { livro_id, meses } = req.body || {};
-
-        const livroID = Number(livro_id);
-        const quantidadeMeses = Number(meses);
-
-        if (
-            !Number.isInteger(livroID) ||
-            livroID <= 0 ||
-            !Number.isInteger(quantidadeMeses) ||
-            quantidadeMeses <= 0
-        ) {
-            return res.status(422).json({
-                erro: "Informe um livro válido e a quantidade de meses"
-            });
-        }
-
-        const livro = await pool.query(
-            `SELECT id FROM livros WHERE id = $1`,
-            [livroID]
-        );
-
-        if (livro.rows.length === 0) {
-            return res.status(404).json({
-                erro: "Livro não encontrado"
-            });
-        }
-
-        const resultado = await pool.query(
-            `INSERT INTO alugueis
-                (usuario_id, livro_id, meses, data_inicio)
-             VALUES ($1, $2, $3, CURRENT_DATE)
-             RETURNING *`,
-            [usuarioID, livroID, quantidadeMeses]
-        );
-
-        return res.status(201).json({
-            mensagem: "Aluguel cadastrado com sucesso",
-            aluguel: resultado.rows[0]
-        });
-    } catch (erro) {
-        console.error("ERRO AO CADASTRAR ALUGUEL:", erro.message);
-
-        if (erro.code === "42P01") {
-            return res.status(500).json({
-                erro: "A tabela alugueis não existe no banco de dados"
-            });
-        }
-
-        return res.status(500).json({
-            erro: "Erro ao cadastrar aluguel"
-        });
-    }
-});
-
-// =====================================================
-// ROTA INICIAL PARA TESTAR A API
-// =====================================================
+// ==========================================
+// ROTA INICIAL
+// ==========================================
 
 app.get("/", (req, res) => {
-    res.status(200).json({
-        mensagem: "API do Paginarium funcionando!"
-    });
+  res.status(200).json({
+    mensagem: "API do Paginarium funcionando!",
+  });
 });
 
-// =====================================================
+// ==========================================
+// CADASTRO DE USUÁRIO
+// ==========================================
+
+app.post("/cadastro", async (req, res) => {
+  try {
+    const { nome, email, senha } = req.body;
+
+    if (!nome || !email || !senha) {
+      return res.status(400).json({
+        erro: "Nome, e-mail e senha são obrigatórios.",
+      });
+    }
+
+    const emailNormalizado = String(email).trim().toLowerCase();
+
+    if (String(senha).length < 6) {
+      return res.status(400).json({
+        erro: "A senha deve ter pelo menos 6 caracteres.",
+      });
+    }
+
+    const existente = await pool.query(
+      "SELECT id FROM usuarios WHERE LOWER(email) = $1",
+      [emailNormalizado]
+    );
+
+    if (existente.rows.length > 0) {
+      return res.status(409).json({
+        erro: "Este e-mail já está cadastrado.",
+      });
+    }
+
+    const senhaHash = await bcrypt.hash(String(senha), 10);
+
+    const resultado = await pool.query(
+      `INSERT INTO usuarios (nome, email, senha)
+       VALUES ($1, $2, $3)
+       RETURNING id, nome, email`,
+      [String(nome).trim(), emailNormalizado, senhaHash]
+    );
+
+    return res.status(201).json({
+      mensagem: "Usuário cadastrado com sucesso.",
+      usuario: resultado.rows[0],
+    });
+  } catch (erro) {
+    console.error("Erro no cadastro:", erro);
+
+    if (erro.code === "23505") {
+      return res.status(409).json({
+        erro: "Este e-mail já está cadastrado.",
+      });
+    }
+
+    return res.status(500).json({
+      erro: "Não foi possível cadastrar o usuário.",
+    });
+  }
+});
+
+// ==========================================
+// LOGIN
+// ==========================================
+
+app.post("/login", async (req, res) => {
+  try {
+    const { email, senha } = req.body;
+
+    if (!email || !senha) {
+      return res.status(400).json({
+        erro: "E-mail e senha são obrigatórios.",
+      });
+    }
+
+    const resultado = await pool.query(
+      `SELECT id, nome, email, senha
+       FROM usuarios
+       WHERE LOWER(email) = $1`,
+      [String(email).trim().toLowerCase()]
+    );
+
+    if (resultado.rows.length === 0) {
+      return res.status(401).json({
+        erro: "E-mail ou senha incorretos.",
+      });
+    }
+
+    const usuario = resultado.rows[0];
+
+    const senhaCorreta = await bcrypt.compare(
+      String(senha),
+      usuario.senha
+    );
+
+    if (!senhaCorreta) {
+      return res.status(401).json({
+        erro: "E-mail ou senha incorretos.",
+      });
+    }
+
+    if (!CHAVE_TOKEN) {
+      return res.status(500).json({
+        erro: "Autenticação não configurada no servidor.",
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        id: usuario.id,
+        email: usuario.email,
+      },
+      CHAVE_TOKEN,
+      { expiresIn: "2h" }
+    );
+
+    return res.status(200).json({
+      mensagem: "Login realizado com sucesso.",
+      token,
+      usuario: {
+        id: usuario.id,
+        nome: usuario.nome,
+        email: usuario.email,
+      },
+    });
+  } catch (erro) {
+    console.error("Erro no login:", erro);
+
+    return res.status(500).json({
+      erro: "Não foi possível realizar o login.",
+    });
+  }
+});
+
+// ==========================================
+// CONSULTAR USUÁRIO
+// ==========================================
+
+app.get("/usuarios/:id", checar_token, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!verificarAcesso(req, id)) {
+      return res.status(403).json({
+        erro: "Você não tem permissão para acessar este usuário.",
+      });
+    }
+
+    // Mantém apenas colunas confirmadas pelo código original.
+    const resultado = await pool.query(
+      `SELECT id, nome, email
+       FROM usuarios
+       WHERE id = $1`,
+      [id]
+    );
+
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({
+        erro: "Usuário não encontrado.",
+      });
+    }
+
+    return res.status(200).json(resultado.rows[0]);
+  } catch (erro) {
+    console.error("Erro ao consultar usuário:", erro);
+
+    return res.status(500).json({
+      erro: "Não foi possível consultar o usuário.",
+    });
+  }
+});
+
+// ==========================================
+// ATUALIZAR USUÁRIO
+// ==========================================
+
+app.put("/usuarios/:id", checar_token, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, email } = req.body;
+
+    if (!verificarAcesso(req, id)) {
+      return res.status(403).json({
+        erro: "Você não tem permissão para alterar este usuário.",
+      });
+    }
+
+    if (!nome || !email) {
+      return res.status(400).json({
+        erro: "Nome e e-mail são obrigatórios.",
+      });
+    }
+
+    const emailNormalizado = String(email).trim().toLowerCase();
+
+    const resultado = await pool.query(
+      `UPDATE usuarios
+       SET nome = $1, email = $2
+       WHERE id = $3
+       RETURNING id, nome, email`,
+      [String(nome).trim(), emailNormalizado, id]
+    );
+
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({
+        erro: "Usuário não encontrado.",
+      });
+    }
+
+    return res.status(200).json({
+      mensagem: "Usuário atualizado com sucesso.",
+      usuario: resultado.rows[0],
+    });
+  } catch (erro) {
+    console.error("Erro ao atualizar usuário:", erro);
+
+    if (erro.code === "23505") {
+      return res.status(409).json({
+        erro: "Este e-mail já está em uso.",
+      });
+    }
+
+    return res.status(500).json({
+      erro: "Não foi possível atualizar o usuário.",
+    });
+  }
+});
+
+// ==========================================
+// EXCLUIR USUÁRIO
+// ==========================================
+
+app.delete("/usuarios/:id", checar_token, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!verificarAcesso(req, id)) {
+      return res.status(403).json({
+        erro: "Você não tem permissão para excluir este usuário.",
+      });
+    }
+
+    const resultado = await pool.query(
+      `DELETE FROM usuarios
+       WHERE id = $1
+       RETURNING id`,
+      [id]
+    );
+
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({
+        erro: "Usuário não encontrado.",
+      });
+    }
+
+    return res.status(200).json({
+      mensagem: "Usuário excluído com sucesso.",
+    });
+  } catch (erro) {
+    console.error("Erro ao excluir usuário:", erro);
+
+    return res.status(500).json({
+      erro: "Não foi possível excluir o usuário.",
+    });
+  }
+});
+
+// ==========================================
+// CADASTRO DE ADMINISTRADOR
+// ==========================================
+
+// ATENÇÃO: esta rota é pública no código original.
+// Não a mantenha pública em produção.
+// O cadastro administrativo deve ser restrito a um
+// processo autorizado e protegido.
+
+app.post("/admin/login", async (req, res) => {
+  return res.status(403).json({
+    erro:
+      "Cadastro público de administrador desativado. " +
+      "Configure um processo administrativo seguro.",
+  });
+});
+
+// ==========================================
+// LISTAR LIVROS
+// ==========================================
+
+app.get("/livros", async (req, res) => {
+  try {
+    const resultado = await pool.query(
+      `SELECT *
+       FROM livros
+       ORDER BY id ASC`
+    );
+
+    return res.status(200).json(resultado.rows);
+  } catch (erro) {
+    console.error("Erro ao listar livros:", erro);
+
+    return res.status(500).json({
+      erro: "Não foi possível listar os livros.",
+    });
+  }
+});
+
+// ==========================================
+// CONSULTAR LIVRO POR ID
+// ==========================================
+
+app.get("/livros/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const resultado = await pool.query(
+      "SELECT * FROM livros WHERE id = $1",
+      [id]
+    );
+
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({
+        erro: "Livro não encontrado.",
+      });
+    }
+
+    return res.status(200).json(resultado.rows[0]);
+  } catch (erro) {
+    console.error("Erro ao consultar livro:", erro);
+
+    return res.status(500).json({
+      erro: "Não foi possível consultar o livro.",
+    });
+  }
+});
+
+// ==========================================
+// CADASTRAR LIVRO
+// ==========================================
+
+app.post("/livros", async (req, res) => {
+  try {
+    const { nome, genero } = req.body;
+
+    if (!nome || !genero) {
+      return res.status(400).json({
+        erro: "Nome e gênero são obrigatórios.",
+      });
+    }
+
+    const resultado = await pool.query(
+      `INSERT INTO livros (nome, genero)
+       VALUES ($1, $2)
+       RETURNING *`,
+      [String(nome).trim(), String(genero).trim()]
+    );
+
+    return res.status(201).json({
+      mensagem: "Livro cadastrado com sucesso.",
+      livro: resultado.rows[0],
+    });
+  } catch (erro) {
+    console.error("Erro ao cadastrar livro:", erro);
+
+    return res.status(500).json({
+      erro: "Não foi possível cadastrar o livro.",
+    });
+  }
+});
+
+// ==========================================
+// ATUALIZAR LIVRO
+// ==========================================
+
+app.put("/livros/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, genero } = req.body;
+
+    if (!nome || !genero) {
+      return res.status(400).json({
+        erro: "Nome e gênero são obrigatórios.",
+      });
+    }
+
+    const resultado = await pool.query(
+      `UPDATE livros
+       SET nome = $1, genero = $2
+       WHERE id = $3
+       RETURNING *`,
+      [String(nome).trim(), String(genero).trim(), id]
+    );
+
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({
+        erro: "Livro não encontrado.",
+      });
+    }
+
+    return res.status(200).json({
+      mensagem: "Livro atualizado com sucesso.",
+      livro: resultado.rows[0],
+    });
+  } catch (erro) {
+    console.error("Erro ao atualizar livro:", erro);
+
+    return res.status(500).json({
+      erro: "Não foi possível atualizar o livro.",
+    });
+  }
+});
+
+// ==========================================
+// EXCLUIR LIVRO
+// ==========================================
+
+app.delete("/livros/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const resultado = await pool.query(
+      `DELETE FROM livros
+       WHERE id = $1
+       RETURNING id`,
+      [id]
+    );
+
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({
+        erro: "Livro não encontrado.",
+      });
+    }
+
+    return res.status(200).json({
+      mensagem: "Livro excluído com sucesso.",
+    });
+  } catch (erro) {
+    console.error("Erro ao excluir livro:", erro);
+
+    return res.status(500).json({
+      erro:
+        erro.code === "23503"
+          ? "Este livro possui registros associados e não pode ser excluído."
+          : "Não foi possível excluir o livro.",
+    });
+  }
+});
+
+// ==========================================
+// LISTAR ALUGUÉIS DO USUÁRIO AUTENTICADO
+// ==========================================
+
+app.get("/alugueis", checar_token, async (req, res) => {
+  try {
+    const usuarioId = req.usuario.id;
+
+    const resultado = await pool.query(
+      `SELECT *
+       FROM alugueis
+       WHERE usuario_id = $1
+       ORDER BY id DESC`,
+      [usuarioId]
+    );
+
+    return res.status(200).json(resultado.rows);
+  } catch (erro) {
+    console.error("Erro ao listar aluguéis:", erro);
+
+    if (erro.code === "42P01") {
+      return res.status(500).json({
+        erro:
+          "A tabela alugueis não existe no banco de dados.",
+      });
+    }
+
+    if (erro.code === "42703") {
+      return res.status(500).json({
+        erro:
+          "Uma das colunas utilizadas na consulta não existe. " +
+          "Confira a estrutura da tabela alugueis.",
+      });
+    }
+
+    return res.status(500).json({
+      erro: "Não foi possível buscar os aluguéis.",
+    });
+  }
+});
+
+// ==========================================
+// CRIAR ALUGUEL
+// ==========================================
+
+app.post("/alugueis", checar_token, async (req, res) => {
+  try {
+    const usuarioId = req.usuario.id;
+    const { livro_id, meses } = req.body;
+
+    const livroId = Number(livro_id);
+    const quantidadeMeses = Number(meses);
+
+    if (
+      !Number.isInteger(livroId) ||
+      livroId <= 0 ||
+      !Number.isInteger(quantidadeMeses) ||
+      quantidadeMeses <= 0
+    ) {
+      return res.status(400).json({
+        erro: "Informe um livro e uma quantidade de meses válidos.",
+      });
+    }
+
+    const livro = await pool.query(
+      "SELECT id FROM livros WHERE id = $1",
+      [livroId]
+    );
+
+    if (livro.rows.length === 0) {
+      return res.status(404).json({
+        erro: "Livro não encontrado.",
+      });
+    }
+
+    const resultado = await pool.query(
+      `INSERT INTO alugueis
+         (usuario_id, livro_id, meses, data_inicio)
+       VALUES ($1, $2, $3, CURRENT_DATE)
+       RETURNING *`,
+      [usuarioId, livroId, quantidadeMeses]
+    );
+
+    return res.status(201).json({
+      mensagem: "Aluguel criado com sucesso.",
+      aluguel: resultado.rows[0],
+    });
+  } catch (erro) {
+    console.error("Erro ao criar aluguel:", erro);
+
+    if (erro.code === "42P01" || erro.code === "42703") {
+      return res.status(500).json({
+        erro:
+          "A estrutura da tabela alugueis não corresponde " +
+          "à consulta da API.",
+      });
+    }
+
+    return res.status(500).json({
+      erro: "Não foi possível criar o aluguel.",
+    });
+  }
+});
+
+// ==========================================
+// TRATAMENTO DE ROTAS INEXISTENTES
+// ==========================================
+
+app.use((req, res) => {
+  return res.status(404).json({
+    erro: "Rota não encontrada.",
+    rota: req.originalUrl,
+  });
+});
+
+// ==========================================
+// TRATAMENTO GLOBAL DE ERROS
+// ==========================================
+
+app.use((erro, req, res, next) => {
+  console.error("Erro inesperado:", erro);
+
+  if (res.headersSent) {
+    return next(erro);
+  }
+
+  return res.status(500).json({
+    erro: "Ocorreu um erro interno no servidor.",
+  });
+});
+
+// ==========================================
 // INICIAR SERVIDOR
-// =====================================================
+// ==========================================
 
 app.listen(porta, () => {
-    console.log(`Servidor rodando na porta ${porta}`);
+  console.log(`PaginariumAPI executando na porta ${porta}`);
 });
