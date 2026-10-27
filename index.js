@@ -3,602 +3,400 @@ import express from "express";
 import "dotenv/config";
 import cors from "cors";
 import pool from "./db.js";
-import bcrypt, { genSalt } from "bcrypt";
+import bcrypt, {genSalt} from "bcrypt";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 
 const app = express();
 const porta = process.env.PORT || 8080;
 
 app.use(express.json());
-
 app.use(cors());
 
-/* =========================
-   CONFIGURAÇÕES E AUTENTICAÇÃO
-========================= */
+//node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
+
+const chave = Buffer.from(process.env.CHAVE_CRYPTO, 'hex');
 
 function checar_token(req, res, next) {
     try {
         const authHeader = req.headers.authorization;
 
+        console.log("AUTH HEADER:", authHeader);
+
         if (!authHeader) {
-            return res.status(401).json({
-                erro: "Token não enviado"
-            });
+            return res.status(401).json("Token não enviado");
         }
 
-        const partes = authHeader.split(" ");
+        const token = authHeader.split(" ")[1];
 
-        if (partes.length !== 2 || partes[0] !== "Bearer") {
-            return res.status(401).json({
-                erro: "Formato do token inválido. Use Bearer <token>."
-            });
-        }
-
-        const token = partes[1];
-
-        if (!process.env.CHAVE_TOKEN) {
-            console.error("CHAVE_TOKEN não configurada.");
-            return res.status(500).json({
-                erro: "Configuração de autenticação ausente"
-            });
-        }
+        console.log("TOKEN:", token);
 
         const decoded = jwt.verify(token, process.env.CHAVE_TOKEN);
 
         req.usuario = decoded;
 
         next();
+
     } catch (erro) {
-        console.error("Erro de autenticação:", erro.message);
-
-        if (erro.name === "TokenExpiredError") {
-            return res.status(401).json({
-                erro: "Token expirado. Faça login novamente."
-            });
-        }
-
-        return res.status(403).json({
-            erro: "Token inválido"
-        });
+        console.log("JWT ERROR:", erro.message);
+        return res.status(403).json("Token inválido");
     }
 }
+
+app.post("/cadastro", async (req, res) => {
+  try {
+    console.log("BODY:", req.body);
+    const { nome, email, senha } = req.body || {};
+
+    if (!nome || !email || !senha) {
+      return res.status(422).json("Campos obrigatórios faltando");
+    }
+
+    const usuarioExiste = await pool.query(
+      `
+      SELECT 1
+      FROM Usuarios
+      WHERE email = $1
+      `,
+      [email]
+    );
+
+    if (usuarioExiste.rows.length > 0) {
+      return res.status(409).json("Esse usuário já foi cadastrado");
+    }
+
+    const salt = await genSalt(12);
+    const senhaHash = await bcrypt.hash(senha, salt);
+
+    const resultado = await pool.query(
+      `
+      INSERT INTO Usuarios (nome, email, senha)
+      VALUES ($1, $2, $3)
+      RETURNING id, nome, email
+      `,
+      [nome, email, senhaHash]
+    );
+
+    res.status(201).json({
+      banco: resultado.rows[0],
+      msg: "Usuário cadastrado com sucesso"
+    });
+
+  } catch (erro) {
+    console.log(erro.message);
+    res.status(500).json("Erro no servidor");
+  }
+});
+
+/*Area de Login no Sistema*/
+
+app.post("/login", async (req, res) => {
+    try {
+        const { email, senha } = req.body;
+
+        if (!email || !senha) {
+            return res.status(422).json("Email e senha obrigatórios");
+        }
+
+        const resultado = await pool.query(
+            "SELECT * FROM Usuarios WHERE email=$1",
+            [email]
+        );
+
+        if (resultado.rows.length === 0) {
+            return res.status(404).json("Usuário não encontrado");
+        }
+
+        const usuario = resultado.rows[0];
+        const senhaValida = await bcrypt.compare(senha, usuario.senha);
+
+        if (!senhaValida) {
+            return res.status(401).json("Senha inválida");
+        }
+
+        const token = jwt.sign(
+            { id: usuario.id, email: usuario.email },
+            process.env.CHAVE_TOKEN,
+            { expiresIn: "2h" }
+        );
+
+        res.json({
+            mensagem: "Login realizado",
+            token
+        });
+
+    } catch (erro) {
+        console.log(erro.message);
+        res.status(500).json("Erro no servidor");
+    }
+});
 
 function verificarAcesso(req, id) {
     return Number(req.usuario.id) === Number(id);
 }
 
-/* =========================
-   ROTA INICIAL E TESTE
-========================= */
-
-app.get("/", (req, res) => {
-    res.status(200).json({
-        mensagem: "PaginariumAPI está funcionando!",
-        status: "online"
-    });
-});
-
-app.get("/health", async (req, res) => {
-    try {
-        await pool.query("SELECT 1");
-
-        res.status(200).json({
-            status: "online",
-            banco: "conectado"
-        });
-    } catch (erro) {
-        console.error("Erro ao verificar banco:", erro.message);
-
-        res.status(503).json({
-            status: "indisponível",
-            banco: "erro de conexão"
-        });
-    }
-});
-
-/* =========================
-   CADASTRO DE USUÁRIOS
-========================= */
-
-app.post("/cadastro", async (req, res) => {
-    try {
-        const { nome, email, senha } = req.body || {};
-
-        if (!nome || !email || !senha) {
-            return res.status(422).json({
-                erro: "Nome, email e senha são obrigatórios"
-            });
-        }
-
-        const usuarioExiste = await pool.query(
-            `SELECT 1 FROM Usuarios WHERE email = $1`,
-            [email]
-        );
-
-        if (usuarioExiste.rows.length > 0) {
-            return res.status(409).json({
-                erro: "Esse usuário já foi cadastrado"
-            });
-        }
-
-        const salt = await genSalt(12);
-        const senhaHash = await bcrypt.hash(senha, salt);
-
-        const resultado = await pool.query(
-            `INSERT INTO Usuarios (nome, email, senha)
-             VALUES ($1, $2, $3)
-             RETURNING id, nome, email`,
-            [nome, email, senhaHash]
-        );
-
-        return res.status(201).json({
-            banco: resultado.rows[0],
-            msg: "Usuário cadastrado com sucesso"
-        });
-    } catch (erro) {
-        console.error("Erro no cadastro:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor ao cadastrar usuário"
-        });
-    }
-});
-
-/* =========================
-   LOGIN DE USUÁRIOS
-========================= */
-
-app.post("/login", async (req, res) => {
-    try {
-        const { email, senha } = req.body || {};
-
-        if (!email || !senha) {
-            return res.status(422).json({
-                erro: "Email e senha são obrigatórios"
-            });
-        }
-
-        const resultado = await pool.query(
-            `SELECT id, nome, email, senha
-             FROM Usuarios
-             WHERE email = $1`,
-            [email]
-        );
-
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({
-                erro: "Usuário não encontrado"
-            });
-        }
-
-        const usuario = resultado.rows[0];
-
-        const senhaValida = await bcrypt.compare(
-            senha,
-            usuario.senha
-        );
-
-        if (!senhaValida) {
-            return res.status(401).json({
-                erro: "Senha inválida"
-            });
-        }
-
-        if (!process.env.CHAVE_TOKEN) {
-            console.error("CHAVE_TOKEN não configurada.");
-
-            return res.status(500).json({
-                erro: "Configuração de autenticação ausente"
-            });
-        }
-
-        const token = jwt.sign(
-            {
-                id: usuario.id,
-                email: usuario.email
-            },
-            process.env.CHAVE_TOKEN,
-            {
-                expiresIn: "2h"
-            }
-        );
-
-        return res.status(200).json({
-            mensagem: "Login realizado",
-            token,
-            usuario: {
-                id: usuario.id,
-                nome: usuario.nome,
-                email: usuario.email
-            }
-        });
-    } catch (erro) {
-        console.error("Erro no login:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor durante o login"
-        });
-    }
-});
-
-/* =========================
-   CONSULTAR USUÁRIO
-========================= */
+/* CONSULTAR USUÁRIO */
 
 app.get("/usuarios/:id", checar_token, async (req, res) => {
     try {
-        const id = Number(req.params.id);
+        console.log("REQ.USUARIO:", req.usuario);
+        console.log("PARAM ID:", req.params.id);
 
-        if (!Number.isInteger(id) || id <= 0) {
-            return res.status(400).json({
-                erro: "ID de usuário inválido"
-            });
-        }
+        const { id } = req.params;
 
         if (!verificarAcesso(req, id)) {
-            return res.status(403).json({
-                erro: "Acesso negado: você só pode consultar sua própria conta"
-            });
+            return res.status(403).json("Acesso negado");
         }
 
         const resultado = await pool.query(
-            `SELECT id, nome, email
-             FROM Usuarios
-             WHERE id = $1`,
+            "SELECT * FROM Usuarios WHERE id=$1",
             [id]
         );
 
         if (resultado.rows.length === 0) {
-            return res.status(404).json({
-                erro: "Usuário não encontrado"
-            });
+            return res.status(404).json("Usuário não encontrado");
         }
 
-        return res.status(200).json(resultado.rows[0]);
-    } catch (erro) {
-        console.error("Erro ao consultar usuário:", erro.message);
+        const usuario = resultado.rows[0];
 
-        return res.status(500).json({
-            erro: "Erro no servidor ao consultar usuário"
-        });
+        res.json(usuario);
+
+    } catch (erro) {
+        console.log(erro.message);
+        res.status(500).json("Erro no servidor");
     }
 });
-
-/* =========================
-   ATUALIZAR USUÁRIO
-========================= */
 
 app.put("/usuarios/:id", checar_token, async (req, res) => {
     try {
         const paramID = Number(req.params.id);
         const id = Number(req.usuario.id);
 
-        if (!Number.isInteger(paramID) || paramID <= 0) {
-            return res.status(400).json({
-                erro: "ID de usuário inválido"
-            });
-        }
-
         if (id !== paramID) {
-            return res.status(403).json({
-                erro: "Acesso negado"
-            });
+            return res.status(403).json("Acesso negado");
         }
 
-        const { nome, email } = req.body || {};
-
-        if (!nome || !email) {
-            return res.status(422).json({
-                erro: "Nome e email são obrigatórios"
-            });
-        }
+        const {nome, email} = req.body;
 
         const resultado = await pool.query(
-            `UPDATE Usuarios
-             SET nome = $1, email = $2
-             WHERE id = $3
-             RETURNING id, nome, email`,
+            `UPDATE Usuarios SET nome=$1, email=$2 WHERE id=$3 RETURNING id`,
             [nome, email, paramID]
         );
 
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({
-                erro: "Usuário não encontrado"
-            });
+        if (resultado.rowCount === 0) {
+            return res.status(404).json("Usuário não encontrado");
         }
 
-        return res.status(200).json({
-            mensagem: "Usuário atualizado com sucesso",
-            usuario: resultado.rows[0]
-        });
+        res.status(200).json("Usuário Atualizado!");
+
     } catch (erro) {
-        console.error("Erro ao atualizar usuário:", erro.message);
-
-        if (erro.code === "23505") {
-            return res.status(409).json({
-                erro: "Esse email já está sendo utilizado"
-            });
-        }
-
-        return res.status(500).json({
-            erro: "Erro no servidor ao atualizar usuário"
-        });
+        console.log(erro.message);
+        res.status(500).json("Erro no servidor");
     }
 });
-
-/* =========================
-   EXCLUIR USUÁRIO
-========================= */
 
 app.delete("/usuarios/:id", checar_token, async (req, res) => {
     try {
         const paramID = Number(req.params.id);
         const id = Number(req.usuario.id);
 
-        if (!Number.isInteger(paramID) || paramID <= 0) {
-            return res.status(400).json({
-                erro: "ID de usuário inválido"
-            });
-        }
+        console.log("ID TOKEN:", id);
+        console.log("ID URL:", paramID);
 
         if (id !== paramID) {
-            return res.status(403).json({
-                erro: "Acesso negado"
-            });
+            return res.status(403).json("Acesso negado");
         }
 
         const resultado = await pool.query(
-            `DELETE FROM Usuarios
-             WHERE id = $1
-             RETURNING id`,
+            "DELETE FROM Usuarios WHERE id=$1 RETURNING id",
             [paramID]
         );
 
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({
-                erro: "Usuário não encontrado"
-            });
+        if (resultado.rowCount === 0) {
+            return res.status(404).json("Usuário não encontrado");
         }
 
-        return res.status(200).json({
-            mensagem: "Usuário deletado com sucesso"
-        });
-    } catch (erro) {
-        console.error("Erro ao excluir usuário:", erro.message);
+        res.status(200).json("Usuário deletado");
 
-        return res.status(500).json({
-            erro: "Erro no servidor ao excluir usuário"
-        });
+    } catch (erro) {
+        console.log("DELETE ERROR:", erro.message);
+        res.status(500).json("Erro no servidor");
     }
 });
 
-/* =========================
-   CADASTRO DE ADMINISTRADOR
-   Mantida a rota original.
-========================= */
+/* Area de Criar Contas Adm*/
 
 app.post("/admin/login", async (req, res) => {
-    try {
-        const { nome, email, senha } = req.body || {};
+  try{
+    const { nome, email, senha } = req.body;
 
-        if (!nome || !email || !senha) {
-            return res.status(422).json({
-                erro: "Nome, email e senha são obrigatórios"
-            });
-        }
+    const admExiste = await pool.query(
+        `
+        SELECT * FROM Administradores
+        WHERE email = $1
+        `,
+        [email]
+    );
 
-        const admExiste = await pool.query(
-            `SELECT 1 FROM Administradores WHERE email = $1`,
-            [email]
-        );
-
-        if (admExiste.rows.length > 0) {
-            return res.status(409).json({
-                erro: "Esse administrador já foi cadastrado"
-            });
-        }
-
-        const salt = await genSalt(12);
-        const senhaHash = await bcrypt.hash(senha, salt);
-
-        const resultado = await pool.query(
-            `INSERT INTO Administradores (nome, email, senha)
-             VALUES ($1, $2, $3)
-             RETURNING id, nome, email`,
-            [nome, email, senhaHash]
-        );
-
-        return res.status(201).json({
-            banco: resultado.rows[0],
-            msg: "Administrador cadastrado com sucesso"
-        });
-    } catch (erro) {
-        console.error("Erro no cadastro de administrador:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor"
-        });
+    if(admExiste.rows.length > 0){
+      return res.status(409).json("Esse administrador já foi cadastrado");
     }
+
+    const salt = await genSalt(12);
+    const senhaHash = await bcrypt.hash(senha, salt);
+
+    const resultado = await pool.query(
+      `
+      INSERT INTO Administradores (nome, email, senha)
+      VALUES ($1, $2, $3)
+      RETURNING id, nome, email
+      `,
+      [nome, email, senhaHash]
+    );
+
+    res.status(201).json({
+      banco: resultado.rows[0],
+      msg: "Administrador cadastrado com sucesso"
+    });
+
+  }catch(erro){
+    console.log(erro.message);
+    res.status(500).json("erro no servidor");
+  }
 });
 
-/* =========================
-   LIVROS - CADASTRAR
-========================= */
+/*Area do Crud dos Livros*/
 
+// POST
 app.post("/livros", async (req, res) => {
-    try {
-        const { nome, genero } = req.body || {};
+  try {
+    const { nome, genero } = req.body;
 
-        if (!nome || !genero) {
-            return res.status(422).json({
-                erro: "Nome e gênero são obrigatórios"
-            });
-        }
-
-        const livroExiste = await pool.query(
-            `SELECT 1 FROM livros WHERE nome = $1`,
-            [nome]
-        );
-
-        if (livroExiste.rows.length > 0) {
-            return res.status(409).json({
-                erro: "Esse livro já foi cadastrado"
-            });
-        }
-
-        const resultado = await pool.query(
-            `INSERT INTO livros (nome, genero)
-             VALUES ($1, $2)
-             RETURNING *`,
-            [nome, genero]
-        );
-
-        return res.status(201).json({
-            banco: resultado.rows[0],
-            msg: "Livro inserido com sucesso"
-        });
-    } catch (erro) {
-        console.error("Erro ao cadastrar livro:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor ao cadastrar livro"
-        });
+    if (!nome || !genero) {
+      return res.status(422).json("Campos obrigatórios faltando");
     }
+
+    const livroExiste = await pool.query(
+      `
+      SELECT * FROM livros
+      WHERE nome = $1
+      `,
+      [nome]
+    );
+
+    if(livroExiste.rows.length > 0){
+        return res.status(409).json("Esse livro ja foi cadastrado!");
+    }
+
+    const resultado = await pool.query(
+      `
+      INSERT INTO livros (nome, genero)
+      VALUES ($1, $2)
+      RETURNING *
+      `,
+      [nome, genero]
+    );
+
+    res.status(201).json({
+      banco: resultado.rows[0],
+      msg:"livro inserido com sucesso"
+    });
+
+  } catch (erro) {
+    res.status(500).json({ erro: erro.message });
+  }
 });
 
-/* =========================
-   LIVROS - LISTAR
-========================= */
-
+// GET
 app.get("/livros", async (req, res) => {
-    try {
-        const resultado = await pool.query(
-            `SELECT * FROM livros ORDER BY id`
-        );
+  try {
+    const resultado = await pool.query(
+      `
+      SELECT * FROM livros
+      ORDER BY id
+      `
+    );
 
-        return res.status(200).json(resultado.rows);
-    } catch (erro) {
-        console.error("Erro ao listar livros:", erro.message);
+    res.status(200).json(resultado.rows);
 
-        return res.status(500).json({
-            erro: "Erro no servidor ao listar livros"
-        });
-    }
+  } catch (erro) {
+    res.status(500).json({ erro: erro.message });
+  }
 });
 
-/* =========================
-   LIVROS - ATUALIZAR
-========================= */
-
+// PUT
 app.put("/livros/:id", async (req, res) => {
-    try {
-        const { nome, genero } = req.body || {};
-        const id = Number(req.params.id);
+  try {
+    const { nome, genero } = req.body;
+    const { id } = req.params;
 
-        if (!Number.isInteger(id) || id <= 0) {
-            return res.status(400).json({
-                erro: "ID de livro inválido"
-            });
-        }
+    const resultado = await pool.query(
+      `
+      UPDATE livros
+      SET nome = $1, genero = $2
+      WHERE id = $3
+      RETURNING *
+      `,
+      [nome, genero, id]
+    );
 
-        if (!nome || !genero) {
-            return res.status(422).json({
-                erro: "Nome e gênero são obrigatórios"
-            });
-        }
-
-        const resultado = await pool.query(
-            `UPDATE livros
-             SET nome = $1, genero = $2
-             WHERE id = $3
-             RETURNING *`,
-            [nome, genero, id]
-        );
-
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({
-                erro: "Livro não encontrado"
-            });
-        }
-
-        return res.status(200).json(resultado.rows[0]);
-    } catch (erro) {
-        console.error("Erro ao atualizar livro:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor ao atualizar livro"
-        });
+    if (resultado.rows.length === 0) {
+      return res.status(404).json("Livro não encontrado");
     }
+
+    res.json(resultado.rows[0]);
+
+  } catch (erro) {
+    res.status(500).json({ erro: erro.message });
+  }
 });
 
-/* =========================
-   LIVROS - EXCLUIR
-========================= */
-
+// DELETE
 app.delete("/livros/:id", async (req, res) => {
-    try {
-        const id = Number(req.params.id);
+  try {
+    const { id } = req.params;
 
-        if (!Number.isInteger(id) || id <= 0) {
-            return res.status(400).json({
-                erro: "ID de livro inválido"
-            });
-        }
+    const resultado = await pool.query(
+      `
+      DELETE FROM livros
+      WHERE id = $1
+      RETURNING *
+      `,
+      [id]
+    );
 
-        const resultado = await pool.query(
-            `DELETE FROM livros
-             WHERE id = $1
-             RETURNING *`,
-            [id]
-        );
-
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({
-                erro: "Livro não encontrado"
-            });
-        }
-
-        return res.status(200).json(resultado.rows[0]);
-    } catch (erro) {
-        console.error("Erro ao excluir livro:", erro.message);
-
-        return res.status(500).json({
-            erro: "Erro no servidor ao excluir livro"
-        });
+    if (resultado.rows.length === 0) {
+      return res.status(404).json("Livro não encontrado");
     }
+
+    res.json(resultado.rows[0]);
+
+  } catch (erro) {
+    res.status(500).json({ erro: erro.message });
+  }
 });
 
-/* =========================
-   ALUGUÉIS
-========================= */
+/* AREA DE ALUGUÉIS */
 
-// A rota existe para que o caminho não fique sem tratamento.
-// A consulta real depende da estrutura das tabelas do PostgreSQL.
+// A rota foi adicionada para evitar que GET /alugueis
+// fique sem tratamento. A consulta real depende do esquema
+// da tabela de aluguéis no PostgreSQL.
 
 app.get("/alugueis", (req, res) => {
     return res.status(501).json({
-        erro: "A rota de aluguéis ainda precisa ser implementada",
-        mensagem: "Configure a consulta conforme as tabelas e relacionamentos do banco de dados."
+        erro: "A consulta de aluguéis ainda precisa ser implementada."
     });
 });
 
-/* =========================
-   ROTA NÃO ENCONTRADA
-========================= */
+/* ROTA NÃO ENCONTRADA */
 
 app.use((req, res) => {
-    return res.status(404).json({
+    res.status(404).json({
         erro: "Rota não encontrada",
-        metodo: req.method,
         caminho: req.originalUrl
     });
 });
 
-/* =========================
-   INICIALIZAÇÃO
-========================= */
-
-app.listen(porta, "0.0.0.0", () => {
-    console.log(`PaginariumAPI rodando na porta ${porta}`);
+app.listen(porta, () => {
+  console.log(`rodando na porta ${porta}`);
 });
