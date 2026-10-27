@@ -553,6 +553,12 @@ app.get("/alugueis", checar_token, async (req, res) => {
          a.valor_total,
          a.criado_em,
          a.reembolsado,
+         (NOT a.reembolsado
+           AND NOW() <= a.criado_em + INTERVAL '5 minutes')
+           AS pode_reembolsar,
+         GREATEST(0, EXTRACT(EPOCH FROM
+           (a.criado_em + INTERVAL '5 minutes' - NOW())))::int
+           AS segundos_reembolso,
          l.nome AS livro_nome,
          l.genero,
          l.capa_url,
