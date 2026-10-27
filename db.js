@@ -1,4 +1,3 @@
-
 require("dotenv").config();
 
 const { Pool } = require("pg");
@@ -12,7 +11,7 @@ pool.on("connect", () => {
 });
 
 pool.on("error", (err) => {
-  console.error("Erro PostgreSQL:", err);
+  console.error("Erro PostgreSQL:", err.message);
 });
 
 module.exports = pool;
