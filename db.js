@@ -4,19 +4,7 @@ import "dotenv/config";
 const { Pool } = pg;
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-
-  // Evita muitas conexões simultâneas no Supabase
-  max: 3,
-
-  // Fecha conexões que ficaram paradas
-  idleTimeoutMillis: 30000,
-
-  // Tempo máximo para conseguir uma conexão
-  connectionTimeoutMillis: 10000,
-
-  // Mantém a conexão TCP ativa
-  keepAlive: true,
+  connectionString: process.env.DATABASE_URL
 });
 
 pool.on("connect", () => {
