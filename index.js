@@ -731,6 +731,8 @@ app.post("/alugueis", checar_token, async (req, res) => {
 
     const aluguel = aluguelResultado.rows[0];
 
+    const creditoNovo = Number(creditoResultado.rows[0].credito);
+
     return res.status(201).json({
       mensagem: "Livro alugado com sucesso.",
       aluguel: {
@@ -739,7 +741,19 @@ app.post("/alugueis", checar_token, async (req, res) => {
         valor_total: Number(aluguel.valor_total),
         reembolsado: false
       },
-      credito: Number(creditoResultado.rows[0].credito),
+      // id do aluguel também na raiz (usado no reembolso).
+      id: aluguel.id,
+      aluguelId: aluguel.id,
+      // Crédito atualizado em vários formatos, para o front achar.
+      credito: creditoNovo,
+      creditos: creditoNovo,
+      saldo: creditoNovo,
+      creditoRestante: creditoNovo,
+      novoCredito: creditoNovo,
+      usuario: {
+        id: usuarioId,
+        credito: creditoNovo
+      },
       creditosUtilizados: creditosNecessarios
     });
   } catch (erro) {
@@ -822,14 +836,16 @@ app.post(
         });
       }
 
-      // O prazo é calculado pelo relógio do banco de dados.
+      // O prazo é calculado inteiramente pelo banco de dados, usando
+      // a coluna criado_em direto (sem passar a data pelo Node), para
+      // evitar diferença de fuso horário entre o servidor e o banco.
       const prazoResultado = await client.query(
         `SELECT
-           (NOW() <= $1::timestamp + INTERVAL '5 minutes')
-             AS dentro_do_prazo,
-           (NOW() - $1::timestamp)
-             AS tempo_decorrido`,
-        [aluguel.criado_em]
+           (NOW() <= criado_em + INTERVAL '5 minutes')
+             AS dentro_do_prazo
+         FROM alugar
+         WHERE id = $1`,
+        [aluguelId]
       );
 
       if (!prazoResultado.rows[0].dentro_do_prazo) {
@@ -887,12 +903,22 @@ app.post(
 
       await client.query("COMMIT");
 
+      const creditoNovo = Number(creditoResultado.rows[0].credito);
+
       return res.json({
         mensagem: "Reembolso realizado com sucesso.",
         aluguelId,
         reembolsado: true,
         creditosDevolvidos,
-        credito: Number(creditoResultado.rows[0].credito)
+        credito: creditoNovo,
+        creditos: creditoNovo,
+        saldo: creditoNovo,
+        creditoRestante: creditoNovo,
+        novoCredito: creditoNovo,
+        usuario: {
+          id: usuarioId,
+          credito: creditoNovo
+        }
       });
     } catch (erro) {
       await client.query("ROLLBACK");
