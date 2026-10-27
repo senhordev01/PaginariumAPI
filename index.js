@@ -8,12 +8,38 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const CHAVE_TOKEN = process.env.CHAVE_TOKEN;
 
-app.use(cors());
-app.use(express.json());
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "Pragma"]
+}));
 
-if (!CHAVE_TOKEN) {
-  console.warn(
-    "AVISO: configure a variável de ambiente CHAVE_TOKEN."
+app.use(express.json({ limit: "1mb" }));
+
+function registrarErro(contexto, erro) {
+  console.error(`[${contexto}]`, {
+    mensagem: erro.message,
+    codigo: erro.code,
+    detalhe: erro.detail,
+    tabela: erro.table,
+    coluna: erro.column,
+    restricao: erro.constraint
+  });
+}
+
+function erroBanco(erro) {
+  return ["42P01", "42703", "42804", "42P02"].includes(erro?.code);
+}
+
+function gerarToken(usuario) {
+  if (!CHAVE_TOKEN) {
+    throw new Error("CHAVE_TOKEN não está configurada.");
+  }
+
+  return jwt.sign(
+    { id: usuario.id, email: usuario.email },
+    CHAVE_TOKEN,
+    { expiresIn: "2h" }
   );
 }
 
@@ -22,70 +48,131 @@ if (!CHAVE_TOKEN) {
 // ======================================================
 
 function checar_token(req, res, next) {
-  const authorization = req.headers.authorization;
-
-  if (!authorization || !authorization.startsWith("Bearer ")) {
-    return res.status(401).json({
-      erro: "Token não informado."
+  if (!CHAVE_TOKEN) {
+    return res.status(500).json({
+      erro: "Autenticação indisponível no servidor."
     });
   }
 
-  const token = authorization.split(" ")[1];
+  const autorizacao = req.headers.authorization;
+
+  if (!autorizacao || !autorizacao.startsWith("Bearer ")) {
+    return res.status(401).json({
+      erro: "Token de autenticação não informado."
+    });
+  }
 
   try {
+    const token = autorizacao.slice(7).trim();
+
     req.usuario = jwt.verify(token, CHAVE_TOKEN);
+
+    if (!Number.isSafeInteger(Number(req.usuario.id))) {
+      return res.status(401).json({
+        erro: "Token não contém um usuário válido."
+      });
+    }
+
     next();
   } catch (erro) {
+    console.error("[JWT]", erro.name, erro.message);
+
+    if (erro.name === "TokenExpiredError") {
+      return res.status(401).json({
+        erro: "Token expirado. Faça login novamente."
+      });
+    }
+
+    if (
+      erro.name === "JsonWebTokenError" &&
+      erro.message === "invalid signature"
+    ) {
+      return res.status(401).json({
+        erro: "Assinatura do token inválida. Verifique a CHAVE_TOKEN e faça login novamente."
+      });
+    }
+
     return res.status(401).json({
       erro: "Token inválido ou expirado."
     });
   }
 }
 
-function mesmoUsuario(req, res, id) {
-  if (Number(req.usuario.id) !== Number(id)) {
-    res.status(403).json({
-      erro: "Você não tem permissão para acessar este recurso."
-    });
-    return false;
-  }
+// ======================================================
+// ROTAS INICIAIS E VERIFICAÇÃO DA API
+// ======================================================
 
-  return true;
-}
+app.get("/", (req, res) => {
+  res.status(200).json({
+    mensagem: "API do Paginarium funcionando."
+  });
+});
+
+app.get("/health", async (req, res) => {
+  try {
+    await pool.query("SELECT 1");
+
+    res.status(200).json({
+      status: "ok",
+      banco: "conectado"
+    });
+  } catch (erro) {
+    registrarErro("Health check", erro);
+
+    res.status(503).json({
+      status: "erro",
+      banco: "indisponível"
+    });
+  }
+});
 
 // ======================================================
 // CADASTRO
 // ======================================================
 
 app.post("/cadastro", async (req, res) => {
-  const { nome, email, senha } = req.body;
-
-  if (
-    typeof nome !== "string" ||
-    typeof email !== "string" ||
-    typeof senha !== "string" ||
-    !nome.trim() ||
-    !email.trim() ||
-    !senha
-  ) {
-    return res.status(400).json({
-      erro: "Informe nome, e-mail e senha."
-    });
-  }
-
   try {
+    const { nome, email, senha } = req.body || {};
+
+    if (
+      typeof nome !== "string" ||
+      !nome.trim() ||
+      typeof email !== "string" ||
+      !email.trim() ||
+      typeof senha !== "string" ||
+      !senha
+    ) {
+      return res.status(400).json({
+        erro: "Informe nome, e-mail e senha."
+      });
+    }
+
+    const nomeNormalizado = nome.trim();
+    const emailNormalizado = email.trim().toLowerCase();
+
+    const existente = await pool.query(
+      "SELECT id FROM usuarios WHERE LOWER(email) = $1",
+      [emailNormalizado]
+    );
+
+    if (existente.rows.length) {
+      return res.status(409).json({
+        erro: "Este e-mail já está cadastrado."
+      });
+    }
+
     const senhaHash = await bcrypt.hash(senha, 10);
 
     const resultado = await pool.query(
       `INSERT INTO usuarios (nome, email, senha)
        VALUES ($1, $2, $3)
        RETURNING id, nome, email, credito`,
-      [nome.trim(), email.trim().toLowerCase(), senhaHash]
+      [nomeNormalizado, emailNormalizado, senhaHash]
     );
 
     const usuario = resultado.rows[0];
 
-    return res.status(201).json({
+    res.status(201).json({
       mensagem: "Usuário cadastrado com sucesso.",
       usuario: {
         ...usuario,
@@ -93,16 +180,17 @@ app.post("/cadastro", async (req, res) => {
       }
     });
   } catch (erro) {
+    registrarErro("Cadastro", erro);
+
     if (erro.code === "23505") {
       return res.status(409).json({
         erro: "Este e-mail já está cadastrado."
       });
     }
 
-    console.error("[Cadastro]", erro);
-
-    return res.status(500).json({
-      erro: "Não foi possível realizar o cadastro."
+    res.status(500).json({
+      erro: "Não foi possível cadastrar o usuário.",
+      codigo: erroBanco(erro) ? erro.code : "ERRO_INTERNO"
     });
   }
 });
@@ -112,29 +200,35 @@ app.post("/cadastro", async (req, res) => {
 // ======================================================
 
 app.post("/login", async (req, res) => {
-  const { email, senha } = req.body;
-
-  if (!email || !senha) {
-    return res.status(400).json({
-      erro: "Informe e-mail e senha."
-    });
-  }
-
   try {
+    const { email, senha } = req.body || {};
+
+    if (
+      typeof email !== "string" ||
+      !email.trim() ||
+      typeof senha !== "string" ||
+      !senha
+    ) {
+      return res.status(400).json({
+        erro: "Informe e-mail e senha."
+      });
+    }
+
     const resultado = await pool.query(
       `SELECT id, nome, email, senha, credito
        FROM usuarios
-       WHERE email = $1`,
-      [String(email).trim().toLowerCase()]
+       WHERE LOWER(email) = $1`,
+      [email.trim().toLowerCase()]
     );
 
-    if (resultado.rows.length === 0) {
+    if (!resultado.rows.length) {
       return res.status(401).json({
-        erro: "E-mail ou senha incorretos."
+        erro: "E-mail ou senha inválidos."
       });
     }
 
     const usuario = resultado.rows[0];
+
     const senhaValida = await bcrypt.compare(
       senha,
       usuario.senha
@@ -142,22 +236,13 @@ app.post("/login", async (req, res) => {
 
     if (!senhaValida) {
       return res.status(401).json({
-        erro: "E-mail ou senha incorretos."
+        erro: "E-mail ou senha inválidos."
       });
     }
 
-    const token = jwt.sign(
-      {
-        id: usuario.id,
-        email: usuario.email
-      },
-      CHAVE_TOKEN,
-      { expiresIn: "7d" }
-    );
-
-    return res.json({
+    res.status(200).json({
       mensagem: "Login realizado com sucesso.",
-      token,
+      token: gerarToken(usuario),
       usuario: {
         id: usuario.id,
         nome: usuario.nome,
@@ -166,61 +251,70 @@ app.post("/login", async (req, res) => {
       }
     });
   } catch (erro) {
-    console.error("[Login]", erro);
+    registrarErro("Login", erro);
 
-    return res.status(500).json({
-      erro: "Não foi possível realizar o login."
+    res.status(500).json({
+      erro: "Não foi possível realizar o login.",
+      codigo: erroBanco(erro) ? erro.code : "ERRO_INTERNO"
     });
   }
 });
 
 // ======================================================
-// USUÁRIOS
+// LISTAR USUÁRIOS
 // ======================================================
 
-// Retorna os dados do usuário autenticado.
 app.get("/usuarios", checar_token, async (req, res) => {
   try {
     const resultado = await pool.query(
       `SELECT id, nome, email, credito
        FROM usuarios
-       WHERE id = $1`,
-      [req.usuario.id]
+       ORDER BY id DESC`
     );
 
-    if (resultado.rows.length === 0) {
-      return res.status(404).json({
-        erro: "Usuário não encontrado."
-      });
-    }
-
-    const usuario = resultado.rows[0];
-
-    return res.json({
-      ...usuario,
-      credito: Number(usuario.credito)
-    });
+    res.status(200).json(
+      resultado.rows.map((usuario) => ({
+        ...usuario,
+        credito: Number(usuario.credito)
+      }))
+    );
   } catch (erro) {
-    console.error("[Listar usuário]", erro);
+    registrarErro("Listar usuários", erro);
 
-    return res.status(500).json({
-      erro: "Não foi possível consultar o usuário."
+    res.status(500).json({
+      erro: "Não foi possível listar os usuários."
     });
   }
 });
 
-app.get("/usuarios/:id", checar_token, async (req, res) => {
-  if (!mesmoUsuario(req, res, req.params.id)) return;
+// ======================================================
+// BUSCAR USUÁRIO
+// ======================================================
 
+app.get("/usuarios/:id", checar_token, async (req, res) => {
   try {
+    const id = Number(req.params.id);
+
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      return res.status(400).json({
+        erro: "ID inválido."
+      });
+    }
+
+    if (id !== Number(req.usuario.id)) {
+      return res.status(403).json({
+        erro: "Você só pode consultar sua própria conta."
+      });
+    }
+
     const resultado = await pool.query(
       `SELECT id, nome, email, credito
        FROM usuarios
        WHERE id = $1`,
-      [req.params.id]
+      [id]
     );
 
-    if (resultado.rows.length === 0) {
+    if (!resultado.rows.length) {
       return res.status(404).json({
         erro: "Usuário não encontrado."
       });
@@ -228,68 +322,60 @@ app.get("/usuarios/:id", checar_token, async (req, res) => {
 
     const usuario = resultado.rows[0];
 
-    return res.json({
+    res.status(200).json({
       ...usuario,
       credito: Number(usuario.credito)
     });
   } catch (erro) {
-    console.error("[Consultar usuário]", erro);
+    registrarErro("Buscar usuário", erro);
 
-    return res.status(500).json({
-      erro: "Não foi possível consultar o usuário."
+    res.status(500).json({
+      erro: "Não foi possível buscar o usuário."
     });
   }
 });
 
+// ======================================================
+// ATUALIZAR USUÁRIO
+// ======================================================
+
 app.put("/usuarios/:id", checar_token, async (req, res) => {
-  if (!mesmoUsuario(req, res, req.params.id)) return;
-
-  const { nome, email, senha } = req.body;
-
-  if (
-    typeof nome !== "string" ||
-    typeof email !== "string" ||
-    !nome.trim() ||
-    !email.trim()
-  ) {
-    return res.status(400).json({
-      erro: "Informe um nome e um e-mail válidos."
-    });
-  }
-
   try {
-    let resultado;
+    const id = Number(req.params.id);
+    const { nome, email } = req.body || {};
 
-    if (senha) {
-      const senhaHash = await bcrypt.hash(String(senha), 10);
-
-      resultado = await pool.query(
-        `UPDATE usuarios
-         SET nome = $1, email = $2, senha = $3
-         WHERE id = $4
-         RETURNING id, nome, email, credito`,
-        [
-          nome.trim(),
-          email.trim().toLowerCase(),
-          senhaHash,
-          req.params.id
-        ]
-      );
-    } else {
-      resultado = await pool.query(
-        `UPDATE usuarios
-         SET nome = $1, email = $2
-         WHERE id = $3
-         RETURNING id, nome, email, credito`,
-        [
-          nome.trim(),
-          email.trim().toLowerCase(),
-          req.params.id
-        ]
-      );
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      return res.status(400).json({
+        erro: "ID inválido."
+      });
     }
 
-    if (resultado.rows.length === 0) {
+    if (id !== Number(req.usuario.id)) {
+      return res.status(403).json({
+        erro: "Você só pode atualizar sua própria conta."
+      });
+    }
+
+    if (
+      typeof nome !== "string" ||
+      !nome.trim() ||
+      typeof email !== "string" ||
+      !email.trim()
+    ) {
+      return res.status(400).json({
+        erro: "Informe nome e e-mail válidos."
+      });
+    }
+
+    const resultado = await pool.query(
+      `UPDATE usuarios
+       SET nome = $1, email = $2
+       WHERE id = $3
+       RETURNING id, nome, email, credito`,
+      [nome.trim(), email.trim().toLowerCase(), id]
+    );
+
+    if (!resultado.rows.length) {
       return res.status(404).json({
         erro: "Usuário não encontrado."
       });
@@ -297,7 +383,7 @@ app.put("/usuarios/:id", checar_token, async (req, res) => {
 
     const usuario = resultado.rows[0];
 
-    return res.json({
+    res.status(200).json({
       mensagem: "Usuário atualizado com sucesso.",
       usuario: {
         ...usuario,
@@ -305,51 +391,71 @@ app.put("/usuarios/:id", checar_token, async (req, res) => {
       }
     });
   } catch (erro) {
+    registrarErro("Atualizar usuário", erro);
+
     if (erro.code === "23505") {
       return res.status(409).json({
-        erro: "Este e-mail já está cadastrado."
+        erro: "Este e-mail já está em uso."
       });
     }
 
-    console.error("[Atualizar usuário]", erro);
-
-    return res.status(500).json({
+    res.status(500).json({
       erro: "Não foi possível atualizar o usuário."
     });
   }
 });
 
-app.delete("/usuarios/:id", checar_token, async (req, res) => {
-  if (!mesmoUsuario(req, res, req.params.id)) return;
+// ======================================================
+// EXCLUIR USUÁRIO
+// ======================================================
 
+app.delete("/usuarios/:id", checar_token, async (req, res) => {
   try {
+    const id = Number(req.params.id);
+
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      return res.status(400).json({
+        erro: "ID inválido."
+      });
+    }
+
+    if (id !== Number(req.usuario.id)) {
+      return res.status(403).json({
+        erro: "Você só pode excluir sua própria conta."
+      });
+    }
+
     const resultado = await pool.query(
-      `DELETE FROM usuarios
-       WHERE id = $1
-       RETURNING id`,
-      [req.params.id]
+      "DELETE FROM usuarios WHERE id = $1 RETURNING id",
+      [id]
     );
 
-    if (resultado.rows.length === 0) {
+    if (!resultado.rows.length) {
       return res.status(404).json({
         erro: "Usuário não encontrado."
       });
     }
 
-    return res.json({
+    res.status(200).json({
       mensagem: "Usuário excluído com sucesso."
     });
   } catch (erro) {
-    console.error("[Excluir usuário]", erro);
+    registrarErro("Excluir usuário", erro);
 
-    return res.status(500).json({
-      erro: "Não foi possível excluir o usuário. Verifique se existem aluguéis vinculados."
+    if (erro.code === "23503") {
+      return res.status(409).json({
+        erro: "Não é possível excluir este usuário porque existem registros vinculados."
+      });
+    }
+
+    res.status(500).json({
+      erro: "Não foi possível excluir o usuário."
     });
   }
 });
 
 // ======================================================
-// LIVROS
+// LISTAR LIVROS
 // ======================================================
 
 app.get("/livros", async (req, res) => {
@@ -357,115 +463,149 @@ app.get("/livros", async (req, res) => {
     const resultado = await pool.query(
       `SELECT id, nome, genero, valor, capa_url, pdf_url
        FROM livros
-       ORDER BY id`
+       ORDER BY id DESC`
     );
 
-    return res.json(
-      resultado.rows.map((livro) => ({
-        ...livro,
-        valor: Number(livro.valor)
-      }))
-    );
+    res.status(200).json(resultado.rows);
   } catch (erro) {
-    console.error("[Listar livros]", erro);
+    registrarErro("Listar livros", erro);
 
-    return res.status(500).json({
+    res.status(500).json({
       erro: "Não foi possível listar os livros."
     });
   }
 });
 
+// ======================================================
+// BUSCAR LIVRO
+// ======================================================
+
 app.get("/livros/:id", async (req, res) => {
   try {
+    const id = Number(req.params.id);
+
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      return res.status(400).json({
+        erro: "ID inválido."
+      });
+    }
+
     const resultado = await pool.query(
       `SELECT id, nome, genero, valor, capa_url, pdf_url
        FROM livros
        WHERE id = $1`,
-      [req.params.id]
+      [id]
     );
 
-    if (resultado.rows.length === 0) {
+    if (!resultado.rows.length) {
       return res.status(404).json({
         erro: "Livro não encontrado."
       });
     }
 
-    const livro = resultado.rows[0];
-
-    return res.json({
-      ...livro,
-      valor: Number(livro.valor)
-    });
+    res.status(200).json(resultado.rows[0]);
   } catch (erro) {
-    console.error("[Consultar livro]", erro);
+    registrarErro("Buscar livro", erro);
 
-    return res.status(500).json({
-      erro: "Não foi possível consultar o livro."
+    res.status(500).json({
+      erro: "Não foi possível buscar o livro."
     });
   }
 });
 
+// ======================================================
+// CADASTRAR LIVRO
+// ======================================================
+
 app.post("/livros", checar_token, async (req, res) => {
-  const { nome, genero, valor, capa_url, pdf_url } = req.body;
-  const valorNumerico = Number(valor);
-
-  if (
-    !nome ||
-    !genero ||
-    !Number.isFinite(valorNumerico) ||
-    valorNumerico < 0 ||
-    !capa_url ||
-    !pdf_url
-  ) {
-    return res.status(400).json({
-      erro: "Informe nome, gênero, valor, capa e PDF do livro."
-    });
-  }
-
   try {
+    const { nome, genero, valor, capa_url, pdf_url } = req.body || {};
+
+    if (
+      typeof nome !== "string" ||
+      !nome.trim() ||
+      typeof genero !== "string" ||
+      !genero.trim() ||
+      valor === undefined ||
+      valor === null ||
+      valor === ""
+    ) {
+      return res.status(400).json({
+        erro: "Informe nome, gênero e valor do livro."
+      });
+    }
+
+    const valorNumerico = Number(valor);
+
+    if (!Number.isFinite(valorNumerico) || valorNumerico < 0) {
+      return res.status(400).json({
+        erro: "Informe um valor válido."
+      });
+    }
+
     const resultado = await pool.query(
       `INSERT INTO livros (nome, genero, valor, capa_url, pdf_url)
        VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, nome, genero, valor, capa_url, pdf_url`,
-      [nome, genero, valorNumerico, capa_url, pdf_url]
+       RETURNING *`,
+      [
+        nome.trim(),
+        genero.trim(),
+        valorNumerico,
+        capa_url || null,
+        pdf_url || null
+      ]
     );
 
-    const livro = resultado.rows[0];
-
-    return res.status(201).json({
+    res.status(201).json({
       mensagem: "Livro cadastrado com sucesso.",
-      livro: {
-        ...livro,
-        valor: Number(livro.valor)
-      }
+      livro: resultado.rows[0]
     });
   } catch (erro) {
-    console.error("[Cadastrar livro]", erro);
+    registrarErro("Cadastrar livro", erro);
 
-    return res.status(500).json({
+    res.status(500).json({
       erro: "Não foi possível cadastrar o livro."
     });
   }
 });
 
+// ======================================================
+// ATUALIZAR LIVRO
+// ======================================================
+
 app.put("/livros/:id", checar_token, async (req, res) => {
-  const { nome, genero, valor, capa_url, pdf_url } = req.body;
-  const valorNumerico = Number(valor);
-
-  if (
-    !nome ||
-    !genero ||
-    !Number.isFinite(valorNumerico) ||
-    valorNumerico < 0 ||
-    !capa_url ||
-    !pdf_url
-  ) {
-    return res.status(400).json({
-      erro: "Informe todos os dados válidos do livro."
-    });
-  }
-
   try {
+    const id = Number(req.params.id);
+    const { nome, genero, valor, capa_url, pdf_url } = req.body || {};
+
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      return res.status(400).json({
+        erro: "ID inválido."
+      });
+    }
+
+    if (
+      typeof nome !== "string" ||
+      !nome.trim() ||
+      typeof genero !== "string" ||
+      !genero.trim() ||
+      valor === undefined ||
+      valor === null ||
+      valor === ""
+    ) {
+      return res.status(400).json({
+        erro: "Informe nome, gênero e valor do livro."
+      });
+    }
+
+    const valorNumerico = Number(valor);
+
+    if (!Number.isFinite(valorNumerico) || valorNumerico < 0) {
+      return res.status(400).json({
+        erro: "Informe um valor válido."
+      });
+    }
+
     const resultado = await pool.query(
       `UPDATE livros
        SET nome = $1,
@@ -474,70 +614,81 @@ app.put("/livros/:id", checar_token, async (req, res) => {
            capa_url = $4,
            pdf_url = $5
        WHERE id = $6
-       RETURNING id, nome, genero, valor, capa_url, pdf_url`,
+       RETURNING *`,
       [
-        nome,
-        genero,
+        nome.trim(),
+        genero.trim(),
         valorNumerico,
-        capa_url,
-        pdf_url,
-        req.params.id
+        capa_url || null,
+        pdf_url || null,
+        id
       ]
     );
 
-    if (resultado.rows.length === 0) {
+    if (!resultado.rows.length) {
       return res.status(404).json({
         erro: "Livro não encontrado."
       });
     }
 
-    const livro = resultado.rows[0];
-
-    return res.json({
+    res.status(200).json({
       mensagem: "Livro atualizado com sucesso.",
-      livro: {
-        ...livro,
-        valor: Number(livro.valor)
-      }
+      livro: resultado.rows[0]
     });
   } catch (erro) {
-    console.error("[Atualizar livro]", erro);
+    registrarErro("Atualizar livro", erro);
 
-    return res.status(500).json({
+    res.status(500).json({
       erro: "Não foi possível atualizar o livro."
     });
   }
 });
 
+// ======================================================
+// EXCLUIR LIVRO
+// ======================================================
+
 app.delete("/livros/:id", checar_token, async (req, res) => {
   try {
+    const id = Number(req.params.id);
+
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      return res.status(400).json({
+        erro: "ID inválido."
+      });
+    }
+
     const resultado = await pool.query(
-      `DELETE FROM livros
-       WHERE id = $1
-       RETURNING id`,
-      [req.params.id]
+      "DELETE FROM livros WHERE id = $1 RETURNING id",
+      [id]
     );
 
-    if (resultado.rows.length === 0) {
+    if (!resultado.rows.length) {
       return res.status(404).json({
         erro: "Livro não encontrado."
       });
     }
 
-    return res.json({
+    res.status(200).json({
       mensagem: "Livro excluído com sucesso."
     });
   } catch (erro) {
-    console.error("[Excluir livro]", erro);
+    registrarErro("Excluir livro", erro);
 
-    return res.status(500).json({
-      erro: "Não foi possível excluir o livro. Verifique se existem aluguéis vinculados."
+    if (erro.code === "23503") {
+      return res.status(409).json({
+        erro: "Não é possível excluir este livro porque existem aluguéis registrados."
+      });
+    }
+
+    res.status(500).json({
+      erro: "Não foi possível excluir o livro."
     });
   }
 });
 
 // ======================================================
-// LISTAR ALUGUÉIS DO USUÁRIO AUTENTICADO
+// LISTAR ALUGUÉIS DO USUÁRIO
 // ======================================================
 
 app.get("/alugueis", checar_token, async (req, res) => {
@@ -552,37 +703,24 @@ app.get("/alugueis", checar_token, async (req, res) => {
          a.meses,
          a.valor_total,
          a.criado_em,
-         a.reembolsado,
-         (NOT a.reembolsado
-           AND NOW() <= a.criado_em + INTERVAL '5 minutes')
-           AS pode_reembolsar,
-         GREATEST(0, EXTRACT(EPOCH FROM
-           (a.criado_em + INTERVAL '5 minutes' - NOW())))::int
-           AS segundos_reembolso,
          l.nome AS livro_nome,
          l.genero,
          l.capa_url,
          l.pdf_url
-       FROM alugar a
-       INNER JOIN livros l ON l.id = a.livro_id
+       FROM alugar AS a
+       INNER JOIN livros AS l ON l.id = a.livro_id
        WHERE a.usuario_id = $1
-       ORDER BY a.criado_em DESC`,
-      [req.usuario.id]
+       ORDER BY a.id DESC`,
+      [Number(req.usuario.id)]
     );
 
-    return res.json(
-      resultado.rows.map((aluguel) => ({
-        ...aluguel,
-        meses: Number(aluguel.meses),
-        valor_total: Number(aluguel.valor_total),
-        reembolsado: Boolean(aluguel.reembolsado)
-      }))
-    );
+    res.status(200).json(resultado.rows);
   } catch (erro) {
-    console.error("[Listar aluguéis]", erro);
+    registrarErro("Listar aluguéis", erro);
 
-    return res.status(500).json({
-      erro: "Não foi possível listar os aluguéis."
+    res.status(500).json({
+      erro: "Não foi possível listar os aluguéis.",
+      codigo: erro.code || "ERRO_INTERNO"
     });
   }
 });
@@ -592,51 +730,34 @@ app.get("/alugueis", checar_token, async (req, res) => {
 // ======================================================
 
 app.post("/alugueis", checar_token, async (req, res) => {
-  const corpo = req.body || {};
-
-  // Aceita vários nomes de campo vindos do front-end.
-  const livroBruto =
-    corpo.livroId ?? corpo.livro_id ?? corpo.idLivro ?? corpo.id;
-
-  const mesesBruto =
-    corpo.quantidadeMeses ??
-    corpo.quantidade_meses ??
-    corpo.meses ??
-    corpo.periodo;
-
-  const livroId = Number(livroBruto);
-  const quantidadeMeses = Number(mesesBruto);
-  const usuarioId = Number(req.usuario.id);
-
-  if (
-    !Number.isInteger(livroId) ||
-    livroId <= 0 ||
-    !Number.isInteger(quantidadeMeses) ||
-    quantidadeMeses < 1 ||
-    quantidadeMeses > 12
-  ) {
-    // Log para você ver no Render o que realmente chegou.
-    console.warn("[Criar aluguel] Dados inválidos:", corpo);
-
-    return res.status(400).json({
-      erro: "Informe um livro válido e um período de 1 a 12 meses.",
-      recebido: {
-        livro: livroBruto ?? null,
-        meses: mesesBruto ?? null
-      },
-      esperado: {
-        livroId: "número inteiro maior que 0",
-        quantidadeMeses: "número inteiro de 1 a 12"
-      }
-    });
-  }
-
-  const client = await pool.connect();
+  const cliente = await pool.connect();
+  let transacaoIniciada = false;
 
   try {
-    await client.query("BEGIN");
+    const usuarioId = Number(req.usuario.id);
+    const { livro_id, meses } = req.body || {};
 
-    const usuarioResultado = await client.query(
+    const livroId = Number(livro_id);
+    const quantidadeMeses = Number(meses);
+
+    if (
+      !Number.isSafeInteger(usuarioId) ||
+      usuarioId <= 0 ||
+      !Number.isSafeInteger(livroId) ||
+      livroId <= 0 ||
+      !Number.isSafeInteger(quantidadeMeses) ||
+      quantidadeMeses <= 0 ||
+      quantidadeMeses > 120
+    ) {
+      return res.status(400).json({
+        erro: "Informe um livro e uma quantidade de meses válida (de 1 a 120)."
+      });
+    }
+
+    await cliente.query("BEGIN");
+    transacaoIniciada = true;
+
+    const usuarioResult = await cliente.query(
       `SELECT id, credito
        FROM usuarios
        WHERE id = $1
@@ -644,47 +765,43 @@ app.post("/alugueis", checar_token, async (req, res) => {
       [usuarioId]
     );
 
-    if (usuarioResultado.rows.length === 0) {
-      await client.query("ROLLBACK");
+    if (!usuarioResult.rows.length) {
+      await cliente.query("ROLLBACK");
+      transacaoIniciada = false;
 
       return res.status(404).json({
         erro: "Usuário não encontrado."
       });
     }
 
-    const livroResultado = await client.query(
-      `SELECT id, nome, valor
-       FROM livros
-       WHERE id = $1`,
+    const livroResult = await cliente.query(
+      "SELECT id, nome, valor FROM livros WHERE id = $1",
       [livroId]
     );
 
-    if (livroResultado.rows.length === 0) {
-      await client.query("ROLLBACK");
+    if (!livroResult.rows.length) {
+      await cliente.query("ROLLBACK");
+      transacaoIniciada = false;
 
       return res.status(404).json({
         erro: "Livro não encontrado."
       });
     }
 
-    const creditoAtual = Number(
-      usuarioResultado.rows[0].credito
-    );
-
-    const valorMensal = Number(
-      livroResultado.rows[0].valor
-    );
+    const valorMensal = Number(livroResult.rows[0].valor);
+    const creditoAtual = Number(usuarioResult.rows[0].credito);
 
     if (
-      !Number.isFinite(creditoAtual) ||
       !Number.isFinite(valorMensal) ||
-      creditoAtual < 0 ||
-      valorMensal < 0
+      valorMensal < 0 ||
+      !Number.isSafeInteger(creditoAtual) ||
+      creditoAtual < 0
     ) {
-      await client.query("ROLLBACK");
+      await cliente.query("ROLLBACK");
+      transacaoIniciada = false;
 
-      return res.status(500).json({
-        erro: "Os valores de créditos ou do livro são inválidos."
+      return res.status(400).json({
+        erro: "O valor do livro ou o saldo de créditos é inválido."
       });
     }
 
@@ -692,280 +809,121 @@ app.post("/alugueis", checar_token, async (req, res) => {
       (valorMensal * quantidadeMeses).toFixed(2)
     );
 
-    // Regra atual: 1 crédito equivale a 1 unidade monetária.
-    // Como credito é INTEGER, valores fracionários são arredondados
-    // para cima para o débito não ficar abaixo do valor da locação.
+    // Regra provisória: 1 crédito equivale a 1 unidade monetária.
     const creditosNecessarios = Math.ceil(valorTotal);
 
     if (creditoAtual < creditosNecessarios) {
-      await client.query("ROLLBACK");
+      await cliente.query("ROLLBACK");
+      transacaoIniciada = false;
 
       return res.status(400).json({
-        erro: "Créditos insuficientes para alugar este livro.",
+        erro: "Créditos insuficientes para realizar o aluguel.",
         credito: creditoAtual,
         creditosNecessarios
       });
     }
 
-    const aluguelResultado = await client.query(
+    const aluguelResult = await cliente.query(
       `INSERT INTO alugar
-         (usuario_id, livro_id, meses, valor_total,
-          data_inicio, data_fim)
+         (usuario_id, livro_id, meses, valor_total, data_inicio, data_fim)
        VALUES
-         ($1, $2, $3::integer, $4, CURRENT_DATE,
-          (CURRENT_DATE + ($3::integer * INTERVAL '1 month'))::date)
+         ($1, $2, $3, $4, CURRENT_DATE,
+         (CURRENT_DATE + ($3 * INTERVAL '1 month'))::date)
        RETURNING
          id, usuario_id, livro_id, meses, valor_total,
          data_inicio, data_fim, criado_em`,
-      [
-        usuarioId,
-        livroId,
-        quantidadeMeses,
-        valorTotal
-      ]
+      [usuarioId, livroId, quantidadeMeses, valorTotal]
     );
 
-    const creditoResultado = await client.query(
-      `UPDATE usuarios
-       SET credito = credito - $1::integer
-       WHERE id = $2
-       RETURNING credito`,
-      [creditosNecessarios, usuarioId]
+    const novoSaldo = creditoAtual - creditosNecessarios;
+
+    await cliente.query(
+      "UPDATE usuarios SET credito = $1 WHERE id = $2",
+      [novoSaldo, usuarioId]
     );
 
-    await client.query("COMMIT");
+    await cliente.query("COMMIT");
+    transacaoIniciada = false;
 
-    const aluguel = aluguelResultado.rows[0];
-
-    const creditoNovo = Number(creditoResultado.rows[0].credito);
-
-    return res.status(201).json({
-      mensagem: "Livro alugado com sucesso.",
-      aluguel: {
-        ...aluguel,
-        meses: Number(aluguel.meses),
-        valor_total: Number(aluguel.valor_total),
-        reembolsado: false
-      },
-      // id do aluguel também na raiz (usado no reembolso).
-      id: aluguel.id,
-      aluguelId: aluguel.id,
-      // Crédito atualizado em vários formatos, para o front achar.
-      credito: creditoNovo,
-      creditos: creditoNovo,
-      saldo: creditoNovo,
-      creditoRestante: creditoNovo,
-      novoCredito: creditoNovo,
-      usuario: {
-        id: usuarioId,
-        credito: creditoNovo
-      },
+    res.status(201).json({
+      mensagem: "Aluguel criado com sucesso.",
+      aluguel: aluguelResult.rows[0],
+      livro: livroResult.rows[0].nome,
+      credito: novoSaldo,
       creditosUtilizados: creditosNecessarios
     });
   } catch (erro) {
-    await client.query("ROLLBACK");
+    if (transacaoIniciada) {
+      try {
+        await cliente.query("ROLLBACK");
+      } catch (erroRollback) {
+        registrarErro("Rollback do aluguel", erroRollback);
+      }
+    }
 
-    console.error("[Criar aluguel]", {
-      mensagem: erro.message,
-      codigo: erro.code,
-      detalhe: erro.detail
-    });
+    registrarErro("Criar aluguel", erro);
 
-    return res.status(500).json({
-      erro: "Não foi possível realizar o aluguel."
+    if (erro.code === "23503") {
+      return res.status(400).json({
+        erro: "O usuário ou o livro informado não existe no banco de dados."
+      });
+    }
+
+    if (erro.code === "23502") {
+      return res.status(400).json({
+        erro: "Um campo obrigatório do aluguel não foi informado.",
+        coluna: erro.column || undefined
+      });
+    }
+
+    if (erro.code === "22P02" || erro.code === "22003") {
+      return res.status(400).json({
+        erro: "Um dos valores informados não é válido."
+      });
+    }
+
+    res.status(500).json({
+      erro: "Não foi possível criar o aluguel.",
+      codigo: erro.code || "ERRO_INTERNO"
     });
   } finally {
-    client.release();
+    cliente.release();
   }
 });
-
-// ======================================================
-// REEMBOLSO DE ALUGUEL — LIMITE DE 5 MINUTOS
-// ======================================================
-
-app.post(
-  "/alugueis/:id/reembolso",
-  checar_token,
-  async (req, res) => {
-    const aluguelId = Number(req.params.id);
-    const usuarioId = Number(req.usuario.id);
-
-    if (!Number.isInteger(aluguelId) || aluguelId <= 0) {
-      return res.status(400).json({
-        erro: "Identificador de aluguel inválido."
-      });
-    }
-
-    const client = await pool.connect();
-
-    try {
-      await client.query("BEGIN");
-
-      // Bloqueia o aluguel para impedir reembolsos duplicados.
-      const aluguelResultado = await client.query(
-        `SELECT
-           id,
-           usuario_id,
-           livro_id,
-           valor_total,
-           criado_em,
-           reembolsado
-         FROM alugar
-         WHERE id = $1
-         FOR UPDATE`,
-        [aluguelId]
-      );
-
-      if (aluguelResultado.rows.length === 0) {
-        await client.query("ROLLBACK");
-
-        return res.status(404).json({
-          erro: "Aluguel não encontrado."
-        });
-      }
-
-      const aluguel = aluguelResultado.rows[0];
-
-      if (Number(aluguel.usuario_id) !== usuarioId) {
-        await client.query("ROLLBACK");
-
-        return res.status(403).json({
-          erro: "Você não pode solicitar reembolso deste aluguel."
-        });
-      }
-
-      if (aluguel.reembolsado) {
-        await client.query("ROLLBACK");
-
-        return res.status(409).json({
-          erro: "Este aluguel já foi reembolsado."
-        });
-      }
-
-      // O prazo é calculado inteiramente pelo banco de dados, usando
-      // a coluna criado_em direto (sem passar a data pelo Node), para
-      // evitar diferença de fuso horário entre o servidor e o banco.
-      const prazoResultado = await client.query(
-        `SELECT
-           (NOW() <= criado_em + INTERVAL '5 minutes')
-             AS dentro_do_prazo
-         FROM alugar
-         WHERE id = $1`,
-        [aluguelId]
-      );
-
-      if (!prazoResultado.rows[0].dentro_do_prazo) {
-        await client.query("ROLLBACK");
-
-        return res.status(400).json({
-          erro: "O prazo de 5 minutos para solicitar o reembolso expirou."
-        });
-      }
-
-      const valorTotal = Number(aluguel.valor_total);
-
-      if (!Number.isFinite(valorTotal) || valorTotal < 0) {
-        await client.query("ROLLBACK");
-
-        return res.status(500).json({
-          erro: "O valor do aluguel é inválido."
-        });
-      }
-
-      // Deve usar a mesma regra de conversão do débito no aluguel.
-      const creditosDevolvidos = Math.ceil(valorTotal);
-
-      // Bloqueia o usuário durante a atualização dos créditos.
-      const usuarioResultado = await client.query(
-        `SELECT id
-         FROM usuarios
-         WHERE id = $1
-         FOR UPDATE`,
-        [usuarioId]
-      );
-
-      if (usuarioResultado.rows.length === 0) {
-        await client.query("ROLLBACK");
-
-        return res.status(404).json({
-          erro: "Usuário não encontrado."
-        });
-      }
-
-      const creditoResultado = await client.query(
-        `UPDATE usuarios
-         SET credito = credito + $1::integer
-         WHERE id = $2
-         RETURNING credito`,
-        [creditosDevolvidos, usuarioId]
-      );
-
-      await client.query(
-        `UPDATE alugar
-         SET reembolsado = TRUE
-         WHERE id = $1`,
-        [aluguelId]
-      );
-
-      await client.query("COMMIT");
-
-      const creditoNovo = Number(creditoResultado.rows[0].credito);
-
-      return res.json({
-        mensagem: "Reembolso realizado com sucesso.",
-        aluguelId,
-        reembolsado: true,
-        creditosDevolvidos,
-        credito: creditoNovo,
-        creditos: creditoNovo,
-        saldo: creditoNovo,
-        creditoRestante: creditoNovo,
-        novoCredito: creditoNovo,
-        usuario: {
-          id: usuarioId,
-          credito: creditoNovo
-        }
-      });
-    } catch (erro) {
-      await client.query("ROLLBACK");
-
-      console.error("[Reembolso]", {
-        mensagem: erro.message,
-        codigo: erro.code,
-        detalhe: erro.detail
-      });
-
-      return res.status(500).json({
-        erro: "Não foi possível processar o reembolso."
-      });
-    } finally {
-      client.release();
-    }
-  }
-);
 
 // ======================================================
 // ROTA INEXISTENTE
 // ======================================================
 
 app.use((req, res) => {
-  return res.status(404).json({
-    erro: "Rota não encontrada."
+  res.status(404).json({
+    erro: "Rota não encontrada.",
+    rota: req.originalUrl
   });
 });
 
 // ======================================================
-// TRATAMENTO DE ERROS
+// ERROS DE JSON E REQUISIÇÃO
 // ======================================================
 
 app.use((erro, req, res, next) => {
-  console.error("[Erro inesperado]", erro);
-
   if (res.headersSent) {
     return next(erro);
   }
 
-  return res.status(500).json({
+  if (
+    erro instanceof SyntaxError &&
+    erro.status === 400 &&
+    "body" in erro
+  ) {
+    return res.status(400).json({
+      erro: "O corpo da requisição contém JSON inválido."
+    });
+  }
+
+  registrarErro("Erro não tratado", erro);
+
+  res.status(500).json({
     erro: "Ocorreu um erro interno no servidor."
   });
 });
@@ -975,5 +933,13 @@ app.use((erro, req, res, next) => {
 // ======================================================
 
 app.listen(PORT, () => {
-  console.log(`Servidor iniciado na porta ${PORT}.`);
+  console.log(`API do Paginarium rodando na porta ${PORT}.`);
+
+  if (!CHAVE_TOKEN) {
+    console.error("AVISO: CHAVE_TOKEN não está configurada.");
+  }
+
+  if (!process.env.DATABASE_URL) {
+    console.error("AVISO: DATABASE_URL não está configurada.");
+  }
 });
