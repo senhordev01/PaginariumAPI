@@ -1,4 +1,3 @@
-
 import express from "express";
 import "dotenv/config";
 import cors from "cors";
@@ -6,9 +5,9 @@ import pool from "./db.js";
 import bcrypt, {genSalt} from "bcrypt";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
-
 const app = express();
 const porta = 8080;
+
 
 app.use(express.json());
 app.use(cors());
@@ -16,7 +15,6 @@ app.use(cors());
 //node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 
 const chave = Buffer.from(process.env.CHAVE_CRYPTO, 'hex');
-
 function checar_token(req, res, next) {
     try {
         const authHeader = req.headers.authorization;
@@ -51,7 +49,7 @@ app.post("/cadastro", async (req, res) => {
     if (!nome || !email || !senha) {
       return res.status(422).json("Campos obrigatórios faltando");
     }
-
+    
     const usuarioExiste = await pool.query(
       `
       SELECT 1
@@ -88,7 +86,7 @@ app.post("/cadastro", async (req, res) => {
   }
 });
 
-/* Area de Login no Sistema */
+/*Area de Login no Sistema*/
 
 app.post("/login", async (req, res) => {
     try {
@@ -137,6 +135,7 @@ function verificarAcesso(req, id) {
 
 app.get("/usuarios/:id", checar_token, async (req, res) => {
     try {
+
         console.log("REQ.USUARIO:", req.usuario);
         console.log("PARAM ID:", req.params.id);
 
@@ -179,6 +178,7 @@ app.put("/usuarios/:id", checar_token, async (req, res) => {
         const resultado = await pool.query(
             `UPDATE Usuarios SET nome=$1, email=$2 WHERE id=$3 RETURNING id`,
             [nome, email, paramID]
+
         );
 
         if (resultado.rowCount === 0) {
@@ -200,7 +200,7 @@ app.delete("/usuarios/:id", checar_token, async (req, res) => {
 
         console.log("ID TOKEN:", id);
         console.log("ID URL:", paramID);
-
+        
         if (id !== paramID) {
             return res.status(403).json("Acesso negado");
         }
@@ -222,10 +222,9 @@ app.delete("/usuarios/:id", checar_token, async (req, res) => {
     }
 });
 
-/* Area de Criar Contas Adm */
-
+/* Area de Criar Contas Adm*/
 app.post("/admin/login", async (req, res) => {
-  try {
+  try{
     const { nome, email, senha } = req.body;
 
     const admExiste = await pool.query(
@@ -237,7 +236,7 @@ app.post("/admin/login", async (req, res) => {
     );
 
     if(admExiste.rows.length > 0){
-      return res.status(409).json("Esse administrador já foi cadastrado");
+      return res.status(409).json("Esse administrador já foi cadastrado")
     }
 
     const salt = await genSalt(12);
@@ -251,19 +250,17 @@ app.post("/admin/login", async (req, res) => {
       `,
       [nome, email, senhaHash]
     );
-
     res.status(201).json({
       banco: resultado.rows[0],
       msg: "Administrador cadastrado com sucesso"
     });
-
-  } catch(erro) {
+  }catch(erro){
     console.log(erro.message);
     res.status(500).json("erro no servidor");
   }
 });
 
-/* Area do CRUD dos Livros */
+/*Area do Crud dos Livros*/
 
 // POST
 app.post("/livros", async (req, res) => {
@@ -273,7 +270,6 @@ app.post("/livros", async (req, res) => {
     if (!nome || !genero) {
       return res.status(422).json("Campos obrigatórios faltando");
     }
-
     const livroExiste = await pool.query(
       `
       SELECT * FROM livros
@@ -285,7 +281,6 @@ app.post("/livros", async (req, res) => {
     if(livroExiste.rows.length > 0){
         return res.status(409).json("Esse livro ja foi cadastrado!");
     }
-
     const resultado = await pool.query(
       `
       INSERT INTO livros (nome, genero)
@@ -295,15 +290,13 @@ app.post("/livros", async (req, res) => {
       [nome, genero]
     );
 
-    res.status(201).json({
-      banco: resultado.rows[0],
-      msg:"livro inserido com sucesso"
-    });
 
+    res.status(201).json({banco: resultado.rows[0], msg:"livro inserido com sucesso"});
   } catch (erro) {
     res.status(500).json({ erro: erro.message });
   }
 });
+
 
 // GET
 app.get("/livros", async (req, res) => {
@@ -321,6 +314,7 @@ app.get("/livros", async (req, res) => {
     res.status(500).json({ erro: erro.message });
   }
 });
+
 
 // PUT
 app.put("/livros/:id", async (req, res) => {
@@ -349,6 +343,7 @@ app.put("/livros/:id", async (req, res) => {
   }
 });
 
+
 // DELETE
 app.delete("/livros/:id", async (req, res) => {
   try {
@@ -373,17 +368,6 @@ app.delete("/livros/:id", async (req, res) => {
     res.status(500).json({ erro: erro.message });
   }
 });
-
-/* Area de Alugueis */
-
-// GET
-app.get("/alugueis", async (req, res) => {
-  return res.status(501).json({
-    erro: "Rota encontrada, mas a consulta de aluguéis ainda não foi implementada."
-  });
-});
-
-/* Inicialização do servidor */
 
 app.listen(porta, () => {
   console.log(`rodando na porta ${porta}`);
