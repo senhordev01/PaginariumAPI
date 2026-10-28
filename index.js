@@ -182,25 +182,36 @@ app.post("/login", async (req, res) => {
       return res.status(422).json("Email e senha obrigatórios");
     }
 
-    let tipo = "normal";
-    let r = await pool.query(
-      "SELECT id, nome, email, senha, credito FROM usuarios WHERE email = $1",
+    // O mesmo e-mail pode existir nas duas tabelas: tenta administradores e usuarios
+    // e entra na conta cuja senha confere.
+    const candidatos = [];
+
+    const adm = await pool.query(
+      "SELECT id, nome, email, senha FROM administradores WHERE LOWER(email) = $1",
       [email]
     );
+    adm.rows.forEach((c) => candidatos.push({ conta: c, tipo: "admin" }));
 
-    if (r.rows.length === 0) {
-      r = await pool.query(
-        "SELECT id, nome, email, senha FROM administradores WHERE email = $1",
-        [email]
-      );
-      tipo = "admin";
+    const usr = await pool.query(
+      "SELECT id, nome, email, senha, credito FROM usuarios WHERE LOWER(email) = $1",
+      [email]
+    );
+    usr.rows.forEach((c) => candidatos.push({ conta: c, tipo: "normal" }));
+
+    let achado = null;
+    for (const c of candidatos) {
+      if (c.conta.senha && (await bcrypt.compare(String(senha), c.conta.senha))) {
+        achado = c;
+        break;
+      }
     }
 
-    const conta = r.rows[0];
-    const senhaValida = conta && (await bcrypt.compare(String(senha), conta.senha));
-    if (!senhaValida) {
+    if (!achado) {
       return res.status(401).json("E-mail ou senha incorretos.");
     }
+
+    const conta = achado.conta;
+    const tipo = achado.tipo;
 
     const token = jwt.sign(
       { id: conta.id, email: conta.email, tipo },
