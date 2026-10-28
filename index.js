@@ -229,6 +229,42 @@ app.post("/login", async (req, res) => {
   }
 });
 
+/* Confirma a senha do usuário logado (usada antes de alugar quando não há biometria).
+   Limita a 5 erros a cada 10 minutos por usuário. */
+const tentativasSenha = new Map();
+
+app.post("/confirmar-senha", checar_token, somenteUsuario, async (req, res) => {
+  try {
+    const id = req.usuario.id;
+    const agora = Date.now();
+    const reg = tentativasSenha.get(id);
+    const ativo = reg && reg.ate > agora;
+
+    if (ativo && reg.falhas >= 5) {
+      return res.status(429).json("Muitas tentativas. Aguarde alguns minutos.");
+    }
+
+    const senha = req.body?.senha;
+    if (!senha) return res.status(422).json("Informe a senha");
+
+    const r = await pool.query("SELECT senha FROM usuarios WHERE id = $1", [id]);
+    const ok = r.rows[0] && (await bcrypt.compare(String(senha), r.rows[0].senha));
+
+    if (!ok) {
+      tentativasSenha.set(id, {
+        falhas: (ativo ? reg.falhas : 0) + 1,
+        ate: agora + 10 * 60 * 1000,
+      });
+      return res.status(400).json("Senha incorreta.");
+    }
+
+    tentativasSenha.delete(id);
+    res.json({ ok: true });
+  } catch (erro) {
+    erroServidor(res, erro, "ERRO CONFIRMAR SENHA");
+  }
+});
+
 /* Criação de administradores (protegida por ADMIN_SECRET) */
 app.post("/admin/cadastro", async (req, res) => {
   try {
