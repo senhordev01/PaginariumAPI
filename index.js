@@ -558,6 +558,50 @@ app.get("/alugueis", checar_token, async (req, res) => {
   }
 });
 
+// =====================================================
+// CAPAS: otimização antes de enviar ao Supabase
+// "sharp" é opcional: sem ele, a capa é enviada como veio.
+// Instale com: npm install sharp
+// =====================================================
+let sharp = null;
+try {
+  sharp = (await import("sharp")).default;
+} catch {
+  console.log("sharp não instalado: capas serão enviadas sem otimização");
+}
+
+// Redimensiona (largura máx. 600px) e converte para JPEG, garantindo
+// um content-type de imagem válido e um arquivo leve.
+async function prepararCapa(arquivo) {
+  const mime = arquivo.mimetype || "";
+
+  if (!sharp) {
+    return {
+      buffer: arquivo.buffer,
+      contentType: mime.startsWith("image/") ? mime : "image/jpeg",
+      ext: null,
+    };
+  }
+
+  try {
+    const buffer = await sharp(arquivo.buffer)
+      .rotate()
+      .resize({ width: 600, withoutEnlargement: true })
+      .jpeg({ quality: 82 })
+      .toBuffer();
+
+    return { buffer, contentType: "image/jpeg", ext: "jpg" };
+  } catch (erro) {
+    throw new Error("Arquivo de capa inválido: envie uma imagem (JPG, PNG ou WebP).");
+  }
+}
+
+function nomeDaCapa(arquivo, preparada, sanitize) {
+  const base = sanitize(arquivo.originalname);
+  if (!preparada.ext) return `${Date.now()}-${base}`;
+  return `${Date.now()}-${base.replace(/\.[^.]*$/, "")}.${preparada.ext}`;
+}
+
 // POST
 app.post("/livros", upload.any(), async (req, res) => {
   try {
@@ -576,10 +620,14 @@ app.post("/livros", upload.any(), async (req, res) => {
     const sanitize = (name) =>
       name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9.-]/g, "-");
 
-    const nomeCapa = `${Date.now()}-${sanitize(capa.originalname)}`;
+    const capaPronta = await prepararCapa(capa);
+    const nomeCapa = nomeDaCapa(capa, capaPronta, sanitize);
     const nomePdf = `${Date.now()}-${sanitize(pdf.originalname)}`;
 
-    const { error: erroCapa } = await supabase.storage.from("capas").upload(nomeCapa, capa.buffer, { contentType: capa.mimetype });
+    const { error: erroCapa } = await supabase.storage.from("capas").upload(nomeCapa, capaPronta.buffer, {
+      contentType: capaPronta.contentType,
+      cacheControl: "31536000",
+    });
     if (erroCapa) { console.log("ERRO CAPA:", erroCapa); return res.status(500).json(erroCapa.message); }
 
     const { error: erroPdf } = await supabase.storage.from("Livros").upload(nomePdf, pdf.buffer, { contentType: pdf.mimetype });
@@ -629,8 +677,12 @@ app.put("/livros/:id", upload.any(), async (req, res) => {
       name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9.-]/g, "-");
 
     if (capa) {
-      const nomeCapa = `${Date.now()}-${sanitize(capa.originalname)}`;
-      const { error } = await supabase.storage.from("capas").upload(nomeCapa, capa.buffer, { contentType: capa.mimetype });
+      const capaPronta = await prepararCapa(capa);
+      const nomeCapa = nomeDaCapa(capa, capaPronta, sanitize);
+      const { error } = await supabase.storage.from("capas").upload(nomeCapa, capaPronta.buffer, {
+        contentType: capaPronta.contentType,
+        cacheControl: "31536000",
+      });
       if (error) return res.status(500).json(error.message);
       capaUrl = supabase.storage.from("capas").getPublicUrl(nomeCapa).data.publicUrl;
     }
@@ -717,6 +769,65 @@ app.delete("/alugueis/:id", checar_token, async (req, res) => {
 });
 
 
+
+// Diagnóstico: testa a URL de cada capa e mostra quais não carregam.
+// Acesse com o token de um ADMIN:  GET /admin/capas/diagnostico
+app.get("/admin/capas/diagnostico", checar_token, async (req, res) => {
+  try {
+    if (req.usuario?.tipo !== "admin") {
+      return res.status(403).json("Acesso negado");
+    }
+
+    const { rows } = await pool.query(
+      "SELECT id, nome, capa_url FROM livros ORDER BY id"
+    );
+
+    const resultados = await Promise.all(
+      rows.map(async (livro) => {
+        if (!livro.capa_url) {
+          return { id: livro.id, nome: livro.nome, status: "SEM_URL" };
+        }
+
+        try {
+          const r = await fetch(livro.capa_url, {
+            method: "GET",
+            headers: { Range: "bytes=0-0" },
+            signal: AbortSignal.timeout(10000),
+          });
+
+          const tipo = r.headers.get("content-type") || "";
+          const ok = r.ok && tipo.startsWith("image/");
+
+          return {
+            id: livro.id,
+            nome: livro.nome,
+            status: ok ? "OK" : "PROBLEMA",
+            http: r.status,
+            content_type: tipo,
+            capa_url: livro.capa_url,
+          };
+        } catch (erro) {
+          return {
+            id: livro.id,
+            nome: livro.nome,
+            status: "ERRO",
+            erro: erro.message,
+            capa_url: livro.capa_url,
+          };
+        }
+      })
+    );
+
+    res.json({
+      total: resultados.length,
+      com_problema: resultados.filter((r) => r.status !== "OK").length,
+      resultados,
+    });
+  } catch (erro) {
+    console.log("ERRO DIAGNÓSTICO CAPAS:", erro.message);
+    res.status(500).json("Erro no servidor");
+  }
+});
 
 app.listen(porta, () => {
   console.log(`rodando na porta ${porta}`);
